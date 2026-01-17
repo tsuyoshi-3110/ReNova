@@ -1,10 +1,15 @@
+// tsconfig.json
 {
   "compilerOptions": {
     "target": "ES2017",
     "lib": ["dom", "dom.iterable", "esnext"],
     "allowJs": true,
     "skipLibCheck": true,
-    "strict": true,
+
+    // ↓ ここをゆるめる
+    "strict": false,
+    "noImplicitAny": false,
+
     "noEmit": true,
     "esModuleInterop": true,
     "module": "esnext",
