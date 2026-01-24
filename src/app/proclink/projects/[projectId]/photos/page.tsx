@@ -61,6 +61,9 @@ type PhotoDoc = {
   width?: number | null;
   height?: number | null;
 
+  shotByDisplayName?: string | null;
+  shotByEmail?: string | null;
+
   kokuban?: {
     projectName?: string | null;
     subtitle?: string | null; // ★追加
@@ -172,7 +175,19 @@ function decodePhotoSnap(snap: QueryDocumentSnapshot<DocumentData>): PhotoDoc {
     stepOrder: getNum(data["stepOrder"]),
     shotAt: (data["shotAt"] as Timestamp | undefined) ?? null,
     createdAt: (data["createdAt"] as Timestamp | undefined) ?? null,
+    shotByDisplayName: getString(data["shotByDisplayName"]),
+    shotByEmail: getString(data["shotByEmail"]),
   };
+}
+
+function pickShooterLabel(p: PhotoDoc): string {
+  const dn = (p.shotByDisplayName ?? "").trim();
+  if (dn) return dn;
+
+  const em = (p.shotByEmail ?? "").trim();
+  if (em) return em;
+
+  return "";
 }
 
 function decodeStepSnap(snap: QueryDocumentSnapshot<DocumentData>): StepDoc {
@@ -258,6 +273,27 @@ export default function RenovaProjectPhotoListPage() {
   const [deletingIds, setDeletingIds] = useState<Record<string, boolean>>({});
 
   const [pdfBusy, setPdfBusy] = useState(false);
+
+  // stepごとの表示中インデックス（スライド）
+  const [stepSlideIndex, setStepSlideIndex] = useState<Record<string, number>>(
+    {},
+  );
+
+  const slidePrev = useCallback((stepId: string) => {
+    setStepSlideIndex((prev) => {
+      const cur = prev[stepId] ?? 0;
+      const next = Math.max(cur - 1, 0);
+      return { ...prev, [stepId]: next };
+    });
+  }, []);
+
+  const slideNext = useCallback((stepId: string, len: number) => {
+    setStepSlideIndex((prev) => {
+      const cur = prev[stepId] ?? 0;
+      const next = Math.min(cur + 1, Math.max(len - 1, 0));
+      return { ...prev, [stepId]: next };
+    });
+  }, []);
 
   // 共通クエリ（戻っても表示崩れない用）
   const baseQuery = useMemo<string>(() => {
@@ -1158,109 +1194,176 @@ export default function RenovaProjectPhotoListPage() {
                   {/* 工程カードを「画面幅に応じて横に並ぶ」グリッドにする */}
                   <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                     {groupedBySteps.map((g) => {
-                      // 基本 step ごとに 1 枚想定：先頭だけ見せる（複数ある場合も一応崩れない）
-                      const p0 = g.photos[0] ?? null;
-                      const url0 = p0 ? pickImageUrl(p0) : null;
-
-                      const selected = p0 ? !!selectedIds[p0.id] : false;
-                      const canDeleteThis = p0 ? canDeleteItem(p0) : false;
-                      const deleting = p0 ? !!deletingIds[p0.id] : false;
+                      const hasAny = g.photos.length > 0;
+                      const len = g.photos.length;
+                      const idx = stepSlideIndex[g.step.id] ?? 0;
 
                       return (
                         <div
                           key={g.step.id}
                           className="overflow-hidden rounded border bg-white dark:border-gray-800 dark:bg-gray-900"
                         >
-                          {/* thumb / placeholder */}
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (!selectMode) return;
-                              if (!p0) return;
-                              toggleSelectOne(p0.id);
-                            }}
-                            className="relative block w-full bg-black"
-                            style={{ aspectRatio: "4 / 3" }}
-                          >
-                            {url0 ? (
-                              // eslint-disable-next-line @next/next/no-img-element
-                              <img
-                                src={url0}
-                                alt="photo"
-                                className="h-full w-full object-cover"
-                              />
-                            ) : (
-                              <div className="grid h-full w-full place-items-center text-sm font-bold text-white/70">
-                                未撮影
-                              </div>
-                            )}
-
-                            {selectMode && p0 && (
-                              <div className="absolute right-3 top-3">
-                                <div
-                                  className={[
-                                    "grid h-8 w-8 place-items-center rounded-full border-2",
-                                    selected
-                                      ? "border-white bg-blue-600"
-                                      : "border-white/90 bg-black/30",
-                                  ].join(" ")}
-                                >
-                                  {selected ? (
-                                    <CheckSquare className="h-5 w-5 text-white" />
-                                  ) : (
-                                    <Square className="h-5 w-5 text-white" />
-                                  )}
-                                </div>
-                              </div>
-                            )}
-                          </button>
-
-                          {/* info */}
-                          <div className="p-4">
+                          {/* header */}
+                          <div className="p-4 border-b dark:border-gray-800">
                             <div className="flex items-start justify-between gap-2">
                               <div className="min-w-0">
                                 <div className="truncate text-sm font-extrabold text-gray-900 dark:text-gray-100">
                                   {g.step.name}
                                 </div>
-                                <div className="mt-1 text-xs font-bold text-gray-500 dark:text-gray-400">
-                                  {p0?.kokuban?.date ?? ""}
-                                </div>
                               </div>
 
-                              {p0 ? null : (
+                              {!hasAny && (
                                 <span className="shrink-0 inline-flex items-center rounded-full bg-gray-100 px-3 py-1 text-xs font-extrabold text-gray-900 dark:bg-gray-800 dark:text-gray-100">
                                   未撮影
                                 </span>
                               )}
                             </div>
-
-                            {/* actions（写真がある時だけ） */}
-                            {p0 && (
-                              <div className="mt-4 flex items-center justify-end gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => downloadOne(p0)}
-                                  disabled={bulkBusy}
-                                  className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-3 py-2 text-sm font-extrabold text-white hover:bg-blue-700 disabled:opacity-50"
-                                >
-                                  <Download className="h-4 w-4" />
-                                  保存
-                                </button>
-
-                                {canDeleteThis && (
-                                  <button
-                                    type="button"
-                                    onClick={() => void deletePhoto(p0)}
-                                    disabled={deleting || bulkBusy}
-                                    className="inline-flex items-center gap-2 rounded-xl bg-red-600 px-3 py-2 text-sm font-extrabold text-white hover:bg-red-700 disabled:opacity-50"
-                                  >
-                                    <Trash2 className="h-4 w-4" />
-                                    {deleting ? "削除中" : "削除"}
-                                  </button>
-                                )}
-                              </div>
-                            )}
                           </div>
+
+                          {/* photos (all) */}
+                          {/* ✅ photo (single) + arrows */}
+                          {hasAny ? (
+                            <div className="p-4">
+                              {(() => {
+                                const safeIdx = Math.min(
+                                  Math.max(idx, 0),
+                                  len - 1,
+                                );
+                                const p = g.photos[safeIdx];
+                                const url = pickImageUrl(p);
+
+                                const selected = !!selectedIds[p.id];
+                                const canDeleteThis = canDeleteItem(p);
+                                const deleting = !!deletingIds[p.id];
+
+                                return (
+                                  <div className="overflow-hidden rounded-xl border bg-white dark:border-gray-800 dark:bg-gray-950">
+                                    {/* thumb */}
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (!selectMode) return;
+                                        toggleSelectOne(p.id);
+                                      }}
+                                      className="relative block w-full bg-black"
+                                      style={{ aspectRatio: "4 / 3" }}
+                                    >
+                                      {url ? (
+                                        // eslint-disable-next-line @next/next/no-img-element
+                                        <img
+                                          src={url}
+                                          alt="photo"
+                                          className="h-full w-full object-cover"
+                                        />
+                                      ) : (
+                                        <div className="grid h-full w-full place-items-center text-sm font-bold text-white/70">
+                                          No Image
+                                        </div>
+                                      )}
+
+                                      {/* 選択チェック */}
+                                      {selectMode && (
+                                        <div className="absolute right-3 top-3">
+                                          <div
+                                            className={[
+                                              "grid h-8 w-8 place-items-center rounded-full border-2",
+                                              selected
+                                                ? "border-white bg-blue-600"
+                                                : "border-white/90 bg-black/30",
+                                            ].join(" ")}
+                                          >
+                                            {selected ? (
+                                              <CheckSquare className="h-5 w-5 text-white" />
+                                            ) : (
+                                              <Square className="h-5 w-5 text-white" />
+                                            )}
+                                          </div>
+                                        </div>
+                                      )}
+
+                                      {/* ✅ 複数枚のときだけ矢印 */}
+                                      {len > 1 && (
+                                        <>
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.preventDefault();
+                                              e.stopPropagation();
+                                              slidePrev(g.step.id);
+                                            }}
+                                            disabled={safeIdx <= 0}
+                                            className="absolute left-2 top-1/2 -translate-y-1/2 grid h-10 w-10 place-items-center rounded-full bg-black/40 text-white disabled:opacity-30"
+                                          >
+                                            ‹
+                                          </button>
+
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.preventDefault();
+                                              e.stopPropagation();
+                                              slideNext(g.step.id, len);
+                                            }}
+                                            disabled={safeIdx >= len - 1}
+                                            className="absolute right-2 top-1/2 -translate-y-1/2 grid h-10 w-10 place-items-center rounded-full bg-black/40 text-white disabled:opacity-30"
+                                          >
+                                            ›
+                                          </button>
+
+                                          <div className="absolute bottom-2 right-2 rounded-full bg-black/50 px-2 py-1 text-xs font-extrabold text-white">
+                                            {safeIdx + 1}/{len}
+                                          </div>
+                                        </>
+                                      )}
+                                    </button>
+
+                                    {/* meta + actions */}
+                                    <div className="p-3">
+                                      <div className="text-xs font-bold text-gray-500 dark:text-gray-400">
+                                        <div>{p.kokuban?.date ?? ""}</div>
+                                        {pickShooterLabel(p) ? (
+                                          <div className="mt-0.5">
+                                            {pickShooterLabel(p)}
+                                          </div>
+                                        ) : null}
+                                      </div>
+
+                                      <div className="mt-3 flex items-center justify-end gap-2">
+                                        <button
+                                          type="button"
+                                          onClick={() => downloadOne(p)}
+                                          disabled={bulkBusy}
+                                          className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-3 py-2 text-sm font-extrabold text-white hover:bg-blue-700 disabled:opacity-50"
+                                        >
+                                          <Download className="h-4 w-4" />
+                                          保存
+                                        </button>
+
+                                        {canDeleteThis && (
+                                          <button
+                                            type="button"
+                                            onClick={() => void deletePhoto(p)}
+                                            disabled={deleting || bulkBusy}
+                                            className="inline-flex items-center gap-2 rounded-xl bg-red-600 px-3 py-2 text-sm font-extrabold text-white hover:bg-red-700 disabled:opacity-50"
+                                          >
+                                            <Trash2 className="h-4 w-4" />
+                                            {deleting ? "削除中" : "削除"}
+                                          </button>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </div>
+                                );
+                              })()}
+                            </div>
+                          ) : (
+                            <div
+                              className="grid w-full place-items-center bg-black text-sm font-bold text-white/70"
+                              style={{ aspectRatio: "4 / 3" }}
+                            >
+                              未撮影
+                            </div>
+                          )}
                         </div>
                       );
                     })}
@@ -1337,8 +1440,13 @@ export default function RenovaProjectPhotoListPage() {
                                       ? `工程 ${p.stepOrder}`
                                       : "—"}
                                 </div>
-                                <div className="mt-1 text-xs font-bold text-gray-500 dark:text-gray-400">
-                                  {p.kokuban?.date ?? ""}
+                                <div className="text-xs font-bold text-gray-500 dark:text-gray-400">
+                                  <div>{p.kokuban?.date ?? ""}</div>
+                                  {pickShooterLabel(p) ? (
+                                    <div className="mt-0.5">
+                                      {pickShooterLabel(p)}
+                                    </div>
+                                  ) : null}
                                 </div>
 
                                 <div className="mt-4 flex items-center justify-end gap-2">
