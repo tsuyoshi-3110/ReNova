@@ -1008,9 +1008,7 @@ export default function RenovaProjectPhotoListPage() {
             </button>
 
             <Link
-              href={`/proclink/projects/${encodeURIComponent(
-                projectId,
-              )}/projectMenu?projectId=${encodeURIComponent(
+              href={`/proclink/projects/projectMenu?projectId=${encodeURIComponent(
                 projectId,
               )}&${baseQuery}`}
               className="inline-flex items-center gap-2 rounded-xl border bg-white px-3 py-2 text-sm font-extrabold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
