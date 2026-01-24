@@ -1,12 +1,6 @@
 "use client";
 
-import React, {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { onAuthStateChanged, type User } from "firebase/auth";
@@ -25,14 +19,7 @@ import {
   type DocumentData,
   type QueryDocumentSnapshot,
 } from "firebase/firestore";
-import {
-  ArrowLeft,
-  Info,
-  Plus,
-  Trash2,
-  Download,
-  GripVertical,
-} from "lucide-react";
+import { ArrowLeft, Info, Plus, Trash2, Download, GripVertical } from "lucide-react";
 
 import { auth, db } from "@/lib/firebaseClient";
 
@@ -71,12 +58,9 @@ function parseProjectMeta(data: DocumentData | undefined): ProjectMeta {
   const roleRaw = data?.role;
   const role: Role = roleRaw === "member" ? "member" : "owner";
 
-  const ownerUid =
-    typeof data?.ownerUid === "string" ? data.ownerUid : undefined;
+  const ownerUid = typeof data?.ownerUid === "string" ? data.ownerUid : undefined;
   const sourceProjectId =
-    typeof data?.sourceProjectId === "string"
-      ? data.sourceProjectId
-      : undefined;
+    typeof data?.sourceProjectId === "string" ? data.sourceProjectId : undefined;
 
   return { role, ownerUid, sourceProjectId };
 }
@@ -105,17 +89,13 @@ export default function RenovaProjectStepsPage() {
 
   // query params
   const projectNameParam = sp.get("projectName");
-  const projectName = projectNameParam
-    ? decodeURIComponent(projectNameParam)
-    : "";
+  const projectName = projectNameParam ? decodeURIComponent(projectNameParam) : "";
 
   const workTypeIdParam = sp.get("workTypeId");
   const workTypeId = workTypeIdParam ? decodeURIComponent(workTypeIdParam) : "";
 
   const workTypeNameParam = sp.get("workTypeName");
-  const workTypeName = workTypeNameParam
-    ? decodeURIComponent(workTypeNameParam)
-    : "";
+  const workTypeName = workTypeNameParam ? decodeURIComponent(workTypeNameParam) : "";
 
   // auth
   const [me, setMe] = useState<User | null>(null);
@@ -131,6 +111,7 @@ export default function RenovaProjectStepsPage() {
   const [dataOwnerUid, setDataOwnerUid] = useState<string | null>(null);
   const [dataProjectId, setDataProjectId] = useState<string | null>(null);
 
+  // ✅ ここはそのままでOK（meta判定）
   useEffect(() => {
     let cancelled = false;
 
@@ -155,8 +136,8 @@ export default function RenovaProjectStepsPage() {
         }
 
         const meta = parseProjectMeta(snap.data());
-
         if (cancelled) return;
+
         setRole(meta.role);
 
         if (meta.role === "member") {
@@ -196,6 +177,24 @@ export default function RenovaProjectStepsPage() {
     return q.toString();
   }, [projectName, workTypeId, workTypeName]);
 
+  /* =========================
+     ✅ steps の参照先（projects 側に統一）
+     - 読み込み/追加/削除/並び替え/テンプレ適用 すべてここを使う
+  ========================= */
+
+  const stepsColRef = useMemo(() => {
+    if (!dataProjectId || !workTypeId) return null;
+    return collection(db, "projects", dataProjectId, "workTypes", workTypeId, "steps");
+  }, [dataProjectId, workTypeId]);
+
+  const stepDocRef = useCallback(
+    (stepId: string) => {
+      if (!dataProjectId || !workTypeId) return null;
+      return doc(db, "projects", dataProjectId, "workTypes", workTypeId, "steps", stepId);
+    },
+    [dataProjectId, workTypeId],
+  );
+
   // steps
   const [steps, setSteps] = useState<Step[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
@@ -211,24 +210,17 @@ export default function RenovaProjectStepsPage() {
       setLoading(true);
       return;
     }
+    if (!stepsColRef) {
+      setSteps([]);
+      setLoading(false);
+      return;
+    }
 
     setLoading(true);
 
-    const col = collection(
-      db,
-      "users",
-      dataOwnerUid,
-      "projects",
-      dataProjectId,
-      "workTypes",
-      workTypeId,
-      "steps",
-    );
-
-    const q = query(col, orderBy("order", "asc"));
-
+    const q0 = query(stepsColRef, orderBy("order", "asc"));
     const unsub = onSnapshot(
-      q,
+      q0,
       (snap) => {
         const list = snap.docs.map(parseStepDoc);
         setSteps(list);
@@ -242,7 +234,7 @@ export default function RenovaProjectStepsPage() {
     );
 
     return () => unsub();
-  }, [uid, projectId, workTypeId, dataOwnerUid, dataProjectId]);
+  }, [uid, projectId, workTypeId, dataOwnerUid, dataProjectId, stepsColRef]);
 
   // add modal
   const [addOpen, setAddOpen] = useState<boolean>(false);
@@ -275,7 +267,7 @@ export default function RenovaProjectStepsPage() {
       setAddOpen(false);
       return;
     }
-    if (!dataOwnerUid || !dataProjectId) {
+    if (!dataProjectId || !stepsColRef) {
       alert("共有情報の取得中です。少し待ってから再度お試しください。");
       return;
     }
@@ -287,22 +279,10 @@ export default function RenovaProjectStepsPage() {
     try {
       setSaving(true);
 
-      const col = collection(
-        db,
-        "users",
-        dataOwnerUid,
-        "projects",
-        dataProjectId,
-        "workTypes",
-        workTypeId,
-        "steps",
-      );
-
       // 末尾に追加（orderは最大+1）
-      const maxOrder = steps.length
-        ? Math.max(...steps.map((s) => s.order))
-        : -1;
-      await addDoc(col, {
+      const maxOrder = steps.length ? Math.max(...steps.map((s) => s.order)) : -1;
+
+      await addDoc(stepsColRef, {
         name,
         order: maxOrder + 1,
         createdAt: serverTimestamp(),
@@ -316,16 +296,7 @@ export default function RenovaProjectStepsPage() {
     } finally {
       setSaving(false);
     }
-  }, [
-    uid,
-    projectId,
-    workTypeId,
-    canEdit,
-    dataOwnerUid,
-    dataProjectId,
-    newName,
-    steps,
-  ]);
+  }, [uid, projectId, workTypeId, canEdit, dataProjectId, stepsColRef, newName, steps]);
 
   const confirmDeleteStep = useCallback(
     async (s: Step) => {
@@ -337,7 +308,13 @@ export default function RenovaProjectStepsPage() {
         alert("共有メンバーは削除できません。");
         return;
       }
-      if (!dataOwnerUid || !dataProjectId || !projectId || !workTypeId) {
+      if (!projectId || !workTypeId || !dataProjectId) {
+        alert("参照情報が確定していません。");
+        return;
+      }
+
+      const ref = stepDocRef(s.id);
+      if (!ref) {
         alert("参照情報が確定していません。");
         return;
       }
@@ -346,24 +323,12 @@ export default function RenovaProjectStepsPage() {
       if (!ok) return;
 
       try {
-        await deleteDoc(
-          doc(
-            db,
-            "users",
-            dataOwnerUid,
-            "projects",
-            dataProjectId,
-            "workTypes",
-            workTypeId,
-            "steps",
-            s.id,
-          ),
-        );
+        await deleteDoc(ref);
       } catch (e: unknown) {
         alert(`削除失敗：${safeMsg(e)}`);
       }
     },
-    [uid, canEdit, dataOwnerUid, dataProjectId, projectId, workTypeId],
+    [uid, canEdit, projectId, workTypeId, dataProjectId, stepDocRef],
   );
 
   const confirmDeleteAll = useCallback(async () => {
@@ -379,14 +344,12 @@ export default function RenovaProjectStepsPage() {
       alert("削除する工程がありません。");
       return;
     }
-    if (!dataOwnerUid || !dataProjectId || !workTypeId) {
+    if (!dataProjectId || !workTypeId) {
       alert("参照情報が確定していません。");
       return;
     }
 
-    const ok = window.confirm(
-      "工程を全削除しますか？\n※この操作は元に戻せません。",
-    );
+    const ok = window.confirm("工程を全削除しますか？\n※この操作は元に戻せません。");
     if (!ok) return;
 
     try {
@@ -394,19 +357,8 @@ export default function RenovaProjectStepsPage() {
       const batch = writeBatch(db);
 
       for (const s of steps) {
-        batch.delete(
-          doc(
-            db,
-            "users",
-            dataOwnerUid,
-            "projects",
-            dataProjectId,
-            "workTypes",
-            workTypeId,
-            "steps",
-            s.id,
-          ),
-        );
+        const ref = stepDocRef(s.id);
+        if (ref) batch.delete(ref);
       }
 
       await batch.commit();
@@ -415,11 +367,10 @@ export default function RenovaProjectStepsPage() {
     } finally {
       setSaving(false);
     }
-  }, [uid, canEdit, steps, dataOwnerUid, dataProjectId, workTypeId]);
+  }, [uid, canEdit, steps, dataProjectId, workTypeId, stepDocRef]);
 
   /* =========================
      Drag & Drop (HTML5)
-     - 追加ライブラリ無しで堅く運用
 ========================= */
 
   const [draggingId, setDraggingId] = useState<string | null>(null);
@@ -440,33 +391,22 @@ export default function RenovaProjectStepsPage() {
     async (finalList: Step[]) => {
       if (!uid) throw new Error("未ログインです。");
       if (!canEdit) throw new Error("共有メンバーは並び替えできません。");
-      if (!dataOwnerUid || !dataProjectId || !workTypeId) {
-        throw new Error("参照情報が確定していません。");
-      }
+      if (!dataProjectId || !workTypeId) throw new Error("参照情報が確定していません。");
 
       const batch = writeBatch(db);
+
       for (const s of finalList) {
-        batch.update(
-          doc(
-            db,
-            "users",
-            dataOwnerUid,
-            "projects",
-            dataProjectId,
-            "workTypes",
-            workTypeId,
-            "steps",
-            s.id,
-          ),
-          {
-            order: s.order,
-            updatedAt: serverTimestamp(),
-          },
-        );
+        const ref = stepDocRef(s.id);
+        if (!ref) continue;
+        batch.update(ref, {
+          order: s.order,
+          updatedAt: serverTimestamp(),
+        });
       }
+
       await batch.commit();
     },
-    [uid, canEdit, dataOwnerUid, dataProjectId, workTypeId],
+    [uid, canEdit, dataProjectId, workTypeId, stepDocRef],
   );
 
   const onDragStart = (index: number, stepId: string) => {
@@ -499,11 +439,8 @@ export default function RenovaProjectStepsPage() {
      Public templates
 ========================= */
 
-  const [publicTemplates, setPublicTemplates] = useState<
-    PublicWorkTemplateSummary[]
-  >([]);
-  const [publicTemplatesLoading, setPublicTemplatesLoading] =
-    useState<boolean>(false);
+  const [publicTemplates, setPublicTemplates] = useState<PublicWorkTemplateSummary[]>([]);
+  const [publicTemplatesLoading, setPublicTemplatesLoading] = useState<boolean>(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -518,13 +455,9 @@ export default function RenovaProjectStepsPage() {
           const data = d.data();
 
           const title =
-            typeof data?.title === "string" && data.title.trim()
-              ? data.title
-              : d.id;
+            typeof data?.title === "string" && data.title.trim() ? data.title : d.id;
 
-          const stepsArr = Array.isArray(data?.steps)
-            ? (data.steps as unknown[])
-            : [];
+          const stepsArr = Array.isArray(data?.steps) ? (data.steps as unknown[]) : [];
           const count = stepsArr.length;
 
           const ts = data?.updatedAt as unknown;
@@ -570,7 +503,7 @@ export default function RenovaProjectStepsPage() {
         alert("共有メンバーはテンプレ適用できません。");
         return;
       }
-      if (!dataOwnerUid || !dataProjectId) {
+      if (!dataProjectId || !stepsColRef) {
         alert("共有情報の取得中です。少し待ってから再度お試しください。");
         return;
       }
@@ -611,42 +544,18 @@ export default function RenovaProjectStepsPage() {
           return;
         }
 
-        // 置換：既存削除 -> 追加
+        // ✅ 置換：既存削除 -> 追加（projects 側に統一）
         const batch = writeBatch(db);
 
         for (const s of steps) {
-          batch.delete(
-            doc(
-              db,
-              "users",
-              dataOwnerUid,
-              "projects",
-              dataProjectId,
-              "workTypes",
-              workTypeId,
-              "steps",
-              s.id,
-            ),
-          );
+          const r = stepDocRef(s.id);
+          if (r) batch.delete(r);
         }
-
-        // addDoc は batch で作れないので、ここは commit -> add の二段階
         await batch.commit();
-
-        const stepsCol = collection(
-          db,
-          "users",
-          dataOwnerUid,
-          "projects",
-          dataProjectId,
-          "workTypes",
-          workTypeId,
-          "steps",
-        );
 
         // orderを0..で再構築
         for (let i = 0; i < templateNames.length; i++) {
-          await addDoc(stepsCol, {
+          await addDoc(stepsColRef, {
             name: normalize2Lines(templateNames[i]),
             order: i,
             createdAt: serverTimestamp(),
@@ -662,7 +571,7 @@ export default function RenovaProjectStepsPage() {
         setSaving(false);
       }
     },
-    [uid, projectId, workTypeId, canEdit, dataOwnerUid, dataProjectId, steps],
+    [uid, projectId, workTypeId, canEdit, dataProjectId, stepsColRef, steps, stepDocRef],
   );
 
   /* =========================
@@ -794,9 +703,7 @@ export default function RenovaProjectStepsPage() {
                           </div>
                           <div className="mt-1 text-xs font-bold text-gray-600 dark:text-gray-400">
                             工程数：{t.count}
-                            {t.updatedAtText
-                              ? ` / 更新：${t.updatedAtText}`
-                              : ""}
+                            {t.updatedAtText ? ` / 更新：${t.updatedAtText}` : ""}
                           </div>
                         </div>
                         <div className="grid h-10 w-10 place-items-center rounded-xl bg-white dark:bg-gray-900">
@@ -823,9 +730,7 @@ export default function RenovaProjectStepsPage() {
                     工程がまだありません
                   </div>
                   <div className="mt-2 text-sm font-semibold text-gray-600 dark:text-gray-400">
-                    {canEdit
-                      ? "右下の「＋」から追加してください"
-                      : "オーナーが追加すると表示されます"}
+                    {canEdit ? "右下の「＋」から追加してください" : "オーナーが追加すると表示されます"}
                   </div>
                 </div>
               )}
@@ -933,7 +838,6 @@ export default function RenovaProjectStepsPage() {
                       onChange={(e) => {
                         const v = e.target.value;
                         const lines = v.split(/\r?\n/);
-                        // 2行を超える入力は止める（RNの挙動に合わせる）
                         if (lines.length <= 2) setNewName(v);
                       }}
                       placeholder={"例：ケレン・清掃\nウレタン塗布"}

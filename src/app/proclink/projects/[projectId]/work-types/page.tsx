@@ -340,10 +340,8 @@ export default function RenovaProjectWorkTypesPage() {
 
     const col = collection(
       db,
-      "users",
-      dataOwnerUid,
       "projects",
-      dataProjectId,
+      dataProjectId, // ownerなら projectId / memberなら sourceProjectId
       "workTypes",
     );
 
@@ -434,14 +432,7 @@ export default function RenovaProjectWorkTypesPage() {
     try {
       setAdding(true);
 
-      const col = collection(
-        db,
-        "users",
-        dataOwnerUid,
-        "projects",
-        dataProjectId,
-        "workTypes",
-      );
+      const col = collection(db, "projects", dataProjectId, "workTypes");
 
       // ✅ 追加時点で order を付ける（新規は最後尾）
       const maxOrder = items.reduce((m, x) => {
@@ -482,17 +473,7 @@ export default function RenovaProjectWorkTypesPage() {
       if (!ok) return;
 
       try {
-        await deleteDoc(
-          doc(
-            db,
-            "users",
-            dataOwnerUid,
-            "projects",
-            dataProjectId,
-            "workTypes",
-            wt.id,
-          ),
-        );
+        await deleteDoc(doc(db, "projects", dataProjectId, "workTypes", wt.id));
       } catch (e: unknown) {
         alert(`削除失敗：${safeMsg(e)}`);
       }
@@ -510,15 +491,7 @@ export default function RenovaProjectWorkTypesPage() {
         const batch = writeBatch(db);
         next.forEach((wt, idx) => {
           batch.set(
-            doc(
-              db,
-              "users",
-              dataOwnerUid,
-              "projects",
-              dataProjectId,
-              "workTypes",
-              wt.id,
-            ),
+            doc(db, "projects", dataProjectId, "workTypes", wt.id),
             { order: idx, updatedAt: serverTimestamp() },
             { merge: true },
           );
@@ -594,28 +567,12 @@ export default function RenovaProjectWorkTypesPage() {
     try {
       setSavingEdit(true);
 
-      await doc(
-        db,
-        "users",
-        dataOwnerUid,
-        "projects",
-        dataProjectId,
-        "workTypes",
-        editTarget.id,
-      );
+      await doc(db, "projects", dataProjectId, "workTypes", editTarget.id);
 
       // setDoc importを増やさず、最小変更で merge 更新したいので batch.set を使う
       const batch = writeBatch(db);
       batch.set(
-        doc(
-          db,
-          "users",
-          dataOwnerUid,
-          "projects",
-          dataProjectId,
-          "workTypes",
-          editTarget.id,
-        ),
+        doc(db, "projects", dataProjectId, "workTypes", editTarget.id),
         { name, updatedAt: serverTimestamp() },
         { merge: true },
       );
@@ -775,7 +732,8 @@ export default function RenovaProjectWorkTypesPage() {
                 工区を追加
               </div>
               <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-                工事「{projectName || "（名称未設定）"}」に紐づく工区を追加します。
+                工事「{projectName || "（名称未設定）"}
+                」に紐づく工区を追加します。
               </div>
 
               <div className="mt-4">

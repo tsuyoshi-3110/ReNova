@@ -3,19 +3,22 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { onAuthStateChanged, type User } from "firebase/auth";
+import { FirebaseError } from "firebase/app";
 import {
   addDoc,
   collection,
   deleteDoc,
   doc,
   getDoc,
+  getDocs,
+  limit,
   onSnapshot,
   orderBy,
   query,
   runTransaction,
   serverTimestamp,
   setDoc,
-  type DocumentData,
+  where,
   type Firestore,
 } from "firebase/firestore";
 import { nanoid } from "nanoid/non-secure";
@@ -30,16 +33,21 @@ type AddMode = "create" | "join";
 type Role = "owner" | "member";
 
 type Project = {
-  id: string;
+  id: string; // = projectId
   name: string;
   subtitle: string;
   shareCode: string | null;
   role: Role;
-  ownerUid?: string | null;
-  sourceProjectId?: string | null;
-  revoked?: boolean;
+  ownerUid: string | null; // member の時は必須 / owner の時は自分
+  sourceProjectId: string | null; // member の時は join 元 / owner は自分の projectId
+  revoked: boolean;
   updatedAt?: unknown;
 };
+
+type JoinReason = "not_found" | "already" | "permission" | "unknown";
+type JoinByShareCodeResult =
+  | { ok: true; name: string }
+  | { ok: false; reason: JoinReason };
 
 function toStr(v: unknown): string {
   return typeof v === "string" ? v : "";
@@ -49,17 +57,33 @@ function toBool(v: unknown): boolean {
   return v === true;
 }
 
+function isObj(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null;
+}
+
 function safeMsg(e: unknown): string {
   if (e instanceof Error) return e.message;
   if (typeof e === "string") return e;
   return "不明なエラー";
 }
 
+function isPermissionDenied(e: unknown): boolean {
+  return e instanceof FirebaseError && e.code === "permission-denied";
+}
+
 /** -----------------------------
- * Firestore helpers
+ * Firestore paths (あなたの正解構成)
+ * - /projects/{projectId}
+ * - /users/{uid}/myProjects/{projectId}
+ * - /projects/{projectId}/members/{uid}
+ * - /shareCodes/{CODE}
  * ----------------------------*/
-function projectsCol(db: Firestore, uid: string) {
-  return collection(db, "users", uid, "projects");
+function rootProjectsCol(db0: Firestore) {
+  return collection(db0, "projects");
+}
+
+function userMyProjectsCol(db0: Firestore, uid: string) {
+  return collection(db0, "users", uid, "myProjects");
 }
 
 // shareCode を「確実に一意」で確保する
@@ -68,14 +92,14 @@ async function reserveShareCode(params: {
   ownerUid: string;
   projectId: string;
 }) {
-  const { db, ownerUid, projectId } = params;
+  const { db: db0, ownerUid, projectId } = params;
 
   for (let i = 0; i < 10; i++) {
     const code = nanoid(6).toUpperCase();
-    const ref = doc(db, "shareCodes", code);
+    const ref = doc(db0, "shareCodes", code);
 
     try {
-      await runTransaction(db, async (tx) => {
+      await runTransaction(db0, async (tx) => {
         const snap = await tx.get(ref);
         if (snap.exists()) throw new Error("code_exists");
         tx.set(ref, {
@@ -88,9 +112,7 @@ async function reserveShareCode(params: {
 
       return code;
     } catch (e) {
-      // 衝突したら再生成してリトライ
       if (e instanceof Error && e.message.includes("code_exists")) continue;
-      // その他も一旦リトライ（通信瞬断などもあるため）
       continue;
     }
   }
@@ -105,35 +127,49 @@ async function createOwnerProject(params: {
   name: string;
   subtitle: string;
 }) {
-  const { db, uid, me, name, subtitle } = params;
+  const { db: db0, uid, me, name, subtitle } = params;
 
-  // まず project を作ってID確定（shareCodeは後で入れる）
-  const docRef = await addDoc(projectsCol(db, uid), {
+  // 1) /projects に作成（ID確定）
+  const rootRef = await addDoc(rootProjectsCol(db0), {
     name,
     subtitle,
+    ownerUid: uid,
     shareCode: null,
-    role: "owner",
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
 
-  // ✅ ここで shareCode を確実に一意で確保
+  // 2) shareCode を確実に一意で確保
   const shareCode = await reserveShareCode({
-    db,
+    db: db0,
     ownerUid: uid,
-    projectId: docRef.id,
+    projectId: rootRef.id,
   });
 
-  // project に shareCode を反映
+  // 3) /projects/{projectId} に shareCode 反映
   await setDoc(
-    doc(db, "users", uid, "projects", docRef.id),
+    doc(db0, "projects", rootRef.id),
     { shareCode, updatedAt: serverTimestamp() },
     { merge: true },
   );
 
-  // owner は members に自分を入れておく（既存のまま）
+  // 4) /users/{uid}/myProjects/{projectId} に自分の一覧として作成
+  await setDoc(doc(db0, "users", uid, "myProjects", rootRef.id), {
+    projectId: rootRef.id,
+    name,
+    subtitle,
+    role: "owner",
+    ownerUid: uid,
+    sourceProjectId: rootRef.id,
+    shareCode,
+    revoked: false,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+
+  // 5) /projects/{projectId}/members/{uid} に owner を入れる（既存仕様維持）
   await setDoc(
-    doc(db, "users", uid, "projects", docRef.id, "members", uid),
+    doc(db0, "projects", rootRef.id, "members", uid),
     {
       uid,
       displayName: me.displayName ?? "",
@@ -144,7 +180,7 @@ async function createOwnerProject(params: {
     { merge: true },
   );
 
-  return { projectId: docRef.id, shareCode };
+  return { projectId: rootRef.id, shareCode };
 }
 
 async function joinByShareCode(params: {
@@ -152,105 +188,145 @@ async function joinByShareCode(params: {
   uid: string;
   me: User;
   code: string;
-}) {
-  const { db, uid, me, code } = params;
+}): Promise<JoinByShareCodeResult> {
+  const { db: db0, uid, me } = params;
+  const code = params.code.trim().toUpperCase();
 
-  // ✅ shareCodes/{CODE} を参照（確実）
-  const codeRef = doc(db, "shareCodes", code);
-  const codeSnap = await getDoc(codeRef);
+  try {
+    let ownerUid: string | null = null;
+    let projectId: string | null = null;
 
-  if (!codeSnap.exists()) {
-    return { ok: false as const, reason: "not_found" as const };
-  }
+    // 1) shareCodes/{CODE}
+    const codeRef = doc(db0, "shareCodes", code);
+    const codeSnap = await getDoc(codeRef);
 
-  const codeData = codeSnap.data() as DocumentData;
+    if (codeSnap.exists()) {
+      const raw = codeSnap.data();
+      const data: unknown = raw;
 
-  // shareCodes 側に保存した ownerUid / projectId を読む
-  const ownerUid =
-    typeof codeData?.ownerUid === "string" ? codeData.ownerUid : null;
-  const sourceProjectId =
-    typeof codeData?.projectId === "string" ? codeData.projectId : null;
+      if (isObj(data)) {
+        ownerUid = toStr(data.ownerUid) || null;
+        projectId = toStr(data.projectId) || null;
+      }
+    }
 
-  if (!ownerUid || !sourceProjectId) {
-    return { ok: false as const, reason: "owner_missing" as const };
-  }
+    // 2) フォールバック：/projects の shareCode で検索
+    if (!ownerUid || !projectId) {
+      const q = query(
+        collection(db0, "projects"),
+        where("shareCode", "==", code),
+        limit(1),
+      );
+      const snaps = await getDocs(q);
 
-  // owner の projects から表示用 name/subtitle を取得（正）
-  const ownerProjectRef = doc(
-    db,
-    "users",
-    ownerUid,
-    "projects",
-    sourceProjectId,
-  );
-  const ownerProjectSnap = await getDoc(ownerProjectRef);
+      if (!snaps.empty) {
+        const hit = snaps.docs[0];
+        projectId = hit.id;
 
-  if (!ownerProjectSnap.exists()) {
-    return { ok: false as const, reason: "not_found" as const };
-  }
+        const raw = hit.data();
+        const data: unknown = raw;
+        if (isObj(data)) ownerUid = toStr(data.ownerUid) || null;
+      }
+    }
 
-  const ownerProject = ownerProjectSnap.data() as DocumentData;
-  const name = toStr(ownerProject?.name) || "工事";
-  const subtitle = toStr(ownerProject?.subtitle).trim();
+    if (!projectId || !ownerUid) {
+      return { ok: false, reason: "not_found" };
+    }
 
-  // 既に自分の projects にあるかチェック（member 側の docId は sourceProjectId を使う）
-  const myRef = doc(db, "users", uid, "projects", sourceProjectId);
-  const exists = await getDoc(myRef);
-  if (exists.exists()) {
-    return { ok: false as const, reason: "already" as const };
-  }
+    // 3) 既に自分の myProjects にあるか
+    const myRef = doc(db0, "users", uid, "myProjects", projectId);
+    const mySnap = await getDoc(myRef);
+    if (mySnap.exists()) {
+      return { ok: false, reason: "already" };
+    }
 
-  await setDoc(myRef, {
-    name,
-    subtitle,
-    shareCode: code,
-    role: "member",
-    ownerUid,
-    sourceProjectId,
-    revoked: false,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-    joinedAt: serverTimestamp(),
-  });
+    // 4) /projects/{projectId} から name/subtitle を取得
+    const rootSnap = await getDoc(doc(db0, "projects", projectId));
+    if (!rootSnap.exists()) {
+      return { ok: false, reason: "not_found" };
+    }
 
-  // owner 側 members に自分を追加
-  await setDoc(
-    doc(db, "users", ownerUid, "projects", sourceProjectId, "members", uid),
-    {
-      uid,
-      displayName: me.displayName ?? "",
-      email: me.email ?? "",
-      joinedAt: serverTimestamp(),
+    const rootRaw = rootSnap.data();
+    const rootData: unknown = rootRaw;
+
+    const name =
+      isObj(rootData) && toStr(rootData.name).trim()
+        ? toStr(rootData.name).trim()
+        : "工事";
+    const subtitle =
+      isObj(rootData) && toStr(rootData.subtitle).trim()
+        ? toStr(rootData.subtitle).trim()
+        : "";
+
+    // 5) /users/{uid}/myProjects/{projectId} に追加
+    await setDoc(myRef, {
+      projectId,
+      name,
+      subtitle,
+      shareCode: code,
+      role: "member",
+      ownerUid,
+      sourceProjectId: projectId,
       revoked: false,
-    },
-    { merge: true },
-  );
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      joinedAt: serverTimestamp(),
+    });
 
-  return { ok: true as const, name, ownerUid, sourceProjectId };
+    // 6) /projects/{projectId}/members/{uid} に追加
+    await setDoc(
+      doc(db0, "projects", projectId, "members", uid),
+      {
+        uid,
+        displayName: me.displayName ?? "",
+        email: me.email ?? "",
+        joinedAt: serverTimestamp(),
+        revoked: false,
+      },
+      { merge: true },
+    );
+
+    return { ok: true, name };
+  } catch (e) {
+    if (isPermissionDenied(e)) return { ok: false, reason: "permission" };
+    return { ok: false, reason: "unknown" };
+  }
 }
 
-/** ✅ owner も member も「自分の users/{uid}/projects/{projectId}」を削除するだけ */
 async function deleteMyProject(params: {
   db: Firestore;
   uid: string;
   projectId: string;
+  role: Role;
+  shareCode: string | null;
 }) {
-  const { db, uid, projectId } = params;
-  await deleteDoc(doc(db, "users", uid, "projects", projectId));
+  const { db: db0, uid, projectId, role, shareCode } = params;
+
+  // 自分の一覧から削除
+  await deleteDoc(doc(db0, "users", uid, "myProjects", projectId));
+
+  // owner の時は /projects と shareCodes も削除（既存の意図に合わせる）
+  if (role === "owner") {
+    if (shareCode) {
+      await deleteDoc(doc(db0, "shareCodes", shareCode));
+    }
+    await deleteDoc(doc(db0, "projects", projectId));
+    // ※ subcollection(members) は自動削除されません（ここでは余計な仕組みは入れません）
+  }
 }
 
 /** -----------------------------
  * Hooks
  * ----------------------------*/
-function useProjectsList(db: Firestore, uid: string | null) {
+function useProjectsList(db0: Firestore, uid: string | null) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [slow, setSlow] = useState(false);
 
   const colRef = useMemo(() => {
     if (!uid) return null;
-    return collection(db, "users", uid, "projects");
-  }, [db, uid]);
+    return userMyProjectsCol(db0, uid);
+  }, [db0, uid]);
 
   useEffect(() => {
     setProjects([]);
@@ -272,21 +348,40 @@ function useProjectsList(db: Firestore, uid: string | null) {
         setSlow(false);
 
         const list: Project[] = snap.docs.map((d) => {
-          const data = d.data() as DocumentData;
+          const raw = d.data();
+          const data: unknown = raw;
+
+          const name = isObj(data) ? toStr(data.name) : "";
+          const subtitle = isObj(data) ? toStr(data.subtitle) : "";
+          const role = (isObj(data) ? toStr(data.role) : "") as Role;
+
+          const shareCode =
+            isObj(data) && typeof data.shareCode === "string"
+              ? data.shareCode
+              : null;
+
+          const ownerUid =
+            isObj(data) && typeof data.ownerUid === "string"
+              ? data.ownerUid
+              : null;
+
+          const sourceProjectId =
+            isObj(data) && typeof data.sourceProjectId === "string"
+              ? data.sourceProjectId
+              : null;
+
+          const revoked = isObj(data) ? toBool(data.revoked) : false;
+
           return {
             id: d.id,
-            name: toStr(data?.name),
-            subtitle: toStr(data?.subtitle),
-            role: (toStr(data?.role) as Role) || "member",
-            shareCode:
-              typeof data?.shareCode === "string" ? data.shareCode : null,
-            ownerUid: typeof data?.ownerUid === "string" ? data.ownerUid : null,
-            sourceProjectId:
-              typeof data?.sourceProjectId === "string"
-                ? data.sourceProjectId
-                : null,
-            revoked: toBool(data?.revoked),
-            updatedAt: data?.updatedAt,
+            name,
+            subtitle,
+            role: role === "owner" || role === "member" ? role : "member",
+            shareCode,
+            ownerUid,
+            sourceProjectId,
+            revoked,
+            updatedAt: isObj(data) ? data.updatedAt : undefined,
           };
         });
 
@@ -310,14 +405,10 @@ function useProjectsList(db: Firestore, uid: string | null) {
   return { projects, loading, slow };
 }
 
-function useMemberRevokedSync(
-  db: Firestore,
-  uid: string | null,
-  projects: Project[],
-) {
+function useMemberRevokedSync(db0: Firestore, uid: string | null, projects: Project[]) {
   const targets = useMemo(() => {
     return projects.filter(
-      (p) => p.role === "member" && !!p.ownerUid && !!p.sourceProjectId,
+      (p) => p.role === "member" && !!p.sourceProjectId,
     );
   }, [projects]);
 
@@ -327,30 +418,20 @@ function useMemberRevokedSync(
 
     const unsubs = targets.map((p) => {
       const projectId = p.sourceProjectId as string;
-      const ownerUid = p.ownerUid as string;
-
-      const memberRef = doc(
-        db,
-        "users",
-        ownerUid,
-        "projects",
-        projectId,
-        "members",
-        uid,
-      );
+      const memberRef = doc(db0, "projects", projectId, "members", uid);
 
       return onSnapshot(
         memberRef,
         async (snap) => {
           const revokedRemote = !snap.exists()
             ? true
-            : toBool((snap.data() as DocumentData)?.revoked);
-          const revokedLocal = !!p.revoked;
+            : toBool((snap.data() as unknown as Record<string, unknown>)?.revoked);
 
+          const revokedLocal = !!p.revoked;
           if (revokedRemote === revokedLocal) return;
 
           await setDoc(
-            doc(db, "users", uid, "projects", projectId),
+            doc(db0, "users", uid, "myProjects", projectId),
             { revoked: revokedRemote, updatedAt: serverTimestamp() },
             { merge: true },
           );
@@ -360,7 +441,7 @@ function useMemberRevokedSync(
     });
 
     return () => unsubs.forEach((u) => u());
-  }, [db, uid, targets]);
+  }, [db0, uid, targets]);
 }
 
 /** -----------------------------
@@ -376,18 +457,15 @@ export default function RenovaProjectsPage() {
   useMemberRevokedSync(db, uid, projects);
 
   const visibleProjects = useMemo(() => {
-    return (
-      projects
-        .filter((p) => !(p.role === "member" && p.revoked))
-        .slice()
-        // ✅ 五十音順（日本語ロケール）
-        .sort((a, b) =>
-          (a.name ?? "").localeCompare(b.name ?? "", "ja", {
-            sensitivity: "base",
-            numeric: true,
-          }),
-        )
-    );
+    return projects
+      .filter((p) => !(p.role === "member" && p.revoked))
+      .slice()
+      .sort((a, b) =>
+        (a.name ?? "").localeCompare(b.name ?? "", "ja", {
+          sensitivity: "base",
+          numeric: true,
+        }),
+      );
   }, [projects]);
 
   // UI state
@@ -441,7 +519,7 @@ export default function RenovaProjectsPage() {
       return;
     }
     if (!subtitle) {
-      window.alert("サブタイトルを入力してください。");
+      window.alert("工種を入力してください。");
       return;
     }
 
@@ -479,21 +557,26 @@ export default function RenovaProjectsPage() {
 
     try {
       setJoining(true);
-      const res = await joinByShareCode({ db, uid: me.uid, me, code });
 
-      if (!res.ok) {
+      const res: JoinByShareCodeResult = await joinByShareCode({
+        db,
+        uid: me.uid,
+        me,
+        code,
+      });
+
+      // ✅ ここが「reason エラーを確実に止める」分岐
+      if (res.ok === false) {
         if (res.reason === "not_found") {
-          window.alert(
-            "共有コードが見つかりません。正しいか確認してください。",
-          );
-          return;
-        }
-        if (res.reason === "owner_missing") {
-          window.alert("参加失敗：共有元の情報が取得できませんでした。");
+          window.alert("共有コードが見つかりません。正しいか確認してください。");
           return;
         }
         if (res.reason === "already") {
           window.alert("この工事はすでに一覧に追加されています。");
+          return;
+        }
+        if (res.reason === "permission") {
+          window.alert("権限がありません。オーナーに確認してください。");
           return;
         }
         window.alert("参加失敗：不明なエラー");
@@ -510,7 +593,6 @@ export default function RenovaProjectsPage() {
     }
   }, [me, joinCode]);
 
-  /** ✅ owner でも member でも「自分の一覧から消す」だけ */
   const onDeleteSelected = useCallback(async () => {
     if (!me || !selected) return;
 
@@ -524,12 +606,13 @@ export default function RenovaProjectsPage() {
     if (!ok) return;
 
     try {
-      // ✅ owner の場合だけ shareCodes も消す
-      if (selected.role === "owner" && selected.shareCode) {
-        await deleteDoc(doc(db, "shareCodes", selected.shareCode));
-      }
-
-      await deleteMyProject({ db, uid: me.uid, projectId: selected.id });
+      await deleteMyProject({
+        db,
+        uid: me.uid,
+        projectId: selected.id,
+        role: selected.role,
+        shareCode: selected.shareCode,
+      });
       closeActions();
     } catch (e) {
       window.alert(`削除失敗：${safeMsg(e)}`);
@@ -543,14 +626,12 @@ export default function RenovaProjectsPage() {
       return;
     }
     if (!selected.shareCode) {
-      window.alert(
-        "共有コードがありません（shareCode が保存されていません）。",
-      );
+      window.alert("共有コードがありません（shareCode が保存されていません）。");
       return;
     }
 
     const message =
-      `【ReNova】工事「${selected.name}」の共有コード：${selected.shareCode}\n` +
+      `【Proclink】工事「${selected.name}」の共有コード：${selected.shareCode}\n` +
       `参加する側は「共有コードで参加」から入力してください。`;
 
     await copyToClipboard(message);
@@ -587,7 +668,7 @@ export default function RenovaProjectsPage() {
               工事一覧
             </h1>
             <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              ReNova（工事プロジェクト）
+              Proclink（工事プロジェクト）
             </div>
           </div>
 
@@ -834,8 +915,7 @@ export default function RenovaProjectsPage() {
             ) : (
               <div className="mt-4 grid gap-3">
                 <div className="text-sm text-gray-600 dark:text-gray-300">
-                  受け取った CODE
-                  を入力すると、この工事があなたの一覧に追加されます。
+                  受け取った CODE を入力すると、この工事があなたの一覧に追加されます。
                 </div>
 
                 <div>

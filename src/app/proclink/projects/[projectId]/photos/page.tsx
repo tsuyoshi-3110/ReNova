@@ -34,6 +34,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import { FileText } from "lucide-react";
 
 import { auth, db } from "@/lib/firebaseClient";
 
@@ -60,6 +61,7 @@ type PhotoDoc = {
 
   kokuban?: {
     projectName?: string | null;
+    subtitle?: string | null; // ★追加
     location?: string | null;
     date?: string | null;
     memo?: string | null;
@@ -139,6 +141,10 @@ function decodePhotoSnap(snap: QueryDocumentSnapshot<DocumentData>): PhotoDoc {
     ? {
         projectName: getString(
           (data["kokuban"] as Record<string, unknown>)["projectName"],
+        ),
+        subtitle: getString(
+          // ★追加：工種
+          (data["kokuban"] as Record<string, unknown>)["subtitle"],
         ),
         location: getString(
           (data["kokuban"] as Record<string, unknown>)["location"],
@@ -240,11 +246,6 @@ export default function RenovaProjectPhotoListPage() {
     return Object.values(selectedIds).filter(Boolean).length;
   }, [selectedIds]);
 
-  const selectedPhotos = useMemo<PhotoDoc[]>(() => {
-    if (!selectMode) return [];
-    return photos.filter((p) => !!selectedIds[p.id]);
-  }, [photos, selectedIds, selectMode]);
-
   // bulk overlay
   const [bulkBusy, setBulkBusy] = useState<boolean>(false);
   const [bulkText, setBulkText] = useState<string>("");
@@ -253,6 +254,8 @@ export default function RenovaProjectPhotoListPage() {
 
   // delete busy
   const [deletingIds, setDeletingIds] = useState<Record<string, boolean>>({});
+
+  const [pdfBusy, setPdfBusy] = useState(false);
 
   // 共通クエリ（戻っても表示崩れない用）
   const baseQuery = useMemo<string>(() => {
@@ -855,6 +858,116 @@ export default function RenovaProjectPhotoListPage() {
     workTypeName,
   ]);
 
+  const buildPdfItems = useCallback(() => {
+    const ordered: Array<{
+      imageUrl: string;
+      projectName: string;
+      subtitle: string; // 工種（kokuban.subtitle）
+      workTypeName: string; // workTypes/name（クエリの workTypeName）
+      location: string; // 場所（kokuban.location）
+      memo: string; // 作業内容（kokuban.memo）
+    }> = [];
+
+    const useSelected = selectMode && selectedCount > 0;
+
+    // 1) 既定工程（先頭1枚だけ）
+    for (const g of groupedBySteps) {
+      const p0 = g.photos[0] ?? null;
+      if (!p0) continue;
+      if (useSelected && !selectedIds[p0.id]) continue;
+
+      const url = pickImageUrl(p0);
+      if (!url) continue;
+
+      const k = p0.kokuban ?? null;
+
+      ordered.push({
+        imageUrl: url,
+        projectName: (k?.projectName ?? projectName ?? "").trim(),
+        subtitle: (k?.subtitle ?? "").trim(), // ★ここが工種
+        workTypeName: (workTypeName ?? "").trim(), // ★workTypes/name
+        location: (k?.location ?? "").trim(),
+        memo: (k?.memo ?? "").trim(), // ★作業内容
+      });
+    }
+
+    // 2) 未分類（全部）
+    for (const p of unclassifiedPhotos) {
+      if (useSelected && !selectedIds[p.id]) continue;
+
+      const url = pickImageUrl(p);
+      if (!url) continue;
+
+      const k = p.kokuban ?? null;
+
+      ordered.push({
+        imageUrl: url,
+        projectName: (k?.projectName ?? projectName ?? "").trim(),
+        subtitle: (k?.subtitle ?? "").trim(), // ★未分類でも memo を入れない
+        workTypeName: (workTypeName ?? "").trim(), // ★workTypes/name
+        location: (k?.location ?? "").trim(),
+        memo: (k?.memo ?? "").trim(),
+      });
+    }
+
+    return ordered;
+  }, [
+    groupedBySteps,
+    unclassifiedPhotos,
+    selectMode,
+    selectedCount,
+    selectedIds,
+    projectName,
+    workTypeName,
+  ]);
+
+  const downloadPdf = useCallback(async () => {
+    if (pdfBusy) return;
+
+    const items = buildPdfItems();
+    console.log("PDF items[0]", items[0]);
+    if (items.length === 0) {
+      window.alert("PDF化できません：対象の写真がありません。");
+      return;
+    }
+
+    const ok = window.confirm(
+      `PDFを作成します（${items.length}ページ）。続行しますか？`,
+    );
+    if (!ok) return;
+
+    try {
+      setPdfBusy(true);
+
+      const res = await fetch("/api/pdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items }),
+      });
+
+      if (!res.ok) {
+        const t = await res.text().catch(() => "");
+        throw new Error(`PDF生成失敗: ${res.status} ${t}`);
+      }
+
+      const blob = await res.blob();
+      const blobUrl = URL.createObjectURL(blob);
+
+      const a = document.createElement("a");
+      a.href = blobUrl;
+      a.download = `${projectName || "project"}_${workTypeName || "worktype"}_photos.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 10_000);
+    } catch (e: unknown) {
+      window.alert(`PDF生成失敗：${toErrorMessage(e)}`);
+    } finally {
+      setPdfBusy(false);
+    }
+  }, [pdfBusy, buildPdfItems, projectName, workTypeName]);
+
   /** ========= 画面のエラー表示（Hook後に分岐するので安全） ========= */
   const missingParams = !projectId || !workTypeId;
 
@@ -917,6 +1030,18 @@ export default function RenovaProjectPhotoListPage() {
                 <CheckSquare className="h-4 w-4" />
               )}
               {selectMode ? "解除" : "選択"}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => void downloadPdf()}
+              disabled={
+                loading || stepsLoading || photos.length === 0 || pdfBusy
+              }
+              className="inline-flex items-center gap-2 rounded-xl border bg-white px-3 py-2 text-sm font-extrabold text-gray-900 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+            >
+              <FileText className="h-4 w-4" />
+              {pdfBusy ? "PDF作成中" : "PDF化"}
             </button>
           </div>
         </div>
