@@ -38,6 +38,8 @@ import { FileText } from "lucide-react";
 
 import { auth, db } from "@/lib/firebaseClient";
 
+import { Loader2 } from "lucide-react";
+
 type Role = "owner" | "member";
 type BaseKind = "root" | "user";
 
@@ -1038,8 +1040,12 @@ export default function RenovaProjectPhotoListPage() {
               }
               className="inline-flex items-center gap-2 rounded-xl border bg-white px-3 py-2 text-sm font-extrabold text-gray-900 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
             >
-              <FileText className="h-4 w-4" />
-              {pdfBusy ? "PDF作成中" : "PDF化"}
+              {pdfBusy ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <FileText className="h-4 w-4" />
+              )}
+              {pdfBusy ? "PDF作成中..." : "PDF化"}
             </button>
           </div>
         </div>
