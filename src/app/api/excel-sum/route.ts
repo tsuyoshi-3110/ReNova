@@ -30,6 +30,7 @@ type ExcelSumResponse = {
   sumsByUnit: Record<string, number>;
   sumM2: number; // m換算合計（unit が m / 箇所 / ㎡ の行）
   detectedCols: {
+    // NOTE: 返却はすべて 1-based（UIの手入力と一致させる）
     item: number;
     desc: number;
     qty: number;
@@ -37,7 +38,12 @@ type ExcelSumResponse = {
     amount: number | null;
     headerRowIndex: number | null;
     usedManualCols: boolean;
-    sizeText: number;
+
+    // 互換用: 旧UIは size を参照している
+    size: number | null;
+
+    // 新UI/内部は sizeText
+    sizeText: number | null; // ★ undefined を返さない
   };
   preview: Array<{
     rowIndex: number; // 1-based
@@ -416,6 +422,67 @@ function sanitizeAiSizeByText(
   return size;
 }
 
+// --- Additional helpers for AI size sanitization ---
+function hasExplicitHeightText(t: string): boolean {
+  // H= / H- / 高さ / 立上り / 糸尺
+  return (
+    /\bH\s*[-=]?\s*\d{1,5}\b/i.test(t) ||
+    /高さ\s*[:=]?\s*\d{1,5}/.test(t) ||
+    /立上り\s*[:=]?\s*\d{1,5}/.test(t) ||
+    /糸尺\s*[:=]?\s*\d{1,5}/.test(t)
+  );
+}
+
+// 量(m)がそのまま「高さmm」に化ける事故を除去する（qty*1000mm に近い値を捨てる）
+function sanitizeSuspiciousMmFromQty(
+  unitNormalized: string,
+  qty: number,
+  rawSizeText: string,
+  size: SizeResult,
+): SizeResult {
+  const u = normalizeText(unitNormalized).replace(/\s+/g, "");
+  if (u !== "m") return size;
+
+  const t = normalizeText(rawSizeText);
+  const hasH = hasExplicitHeightText(t);
+
+  const out: SizeResult = { ...size };
+
+  // 立上り等の現実的な範囲ガード（qty誤爆もここで止まる）
+  // 防水の立上り/高さは通常数十〜数千mmなので 5000mm を上限にする
+  const MAX_H_MM = 5000;
+
+  const qtyMm = Number.isFinite(qty) ? qty * 1000 : NaN;
+  const tol = Number.isFinite(qtyMm) ? Math.max(30, Math.abs(qtyMm) * 0.02) : 0; // 2% or 30mm
+
+  if (out.heightMm != null) {
+    if (out.heightMm > MAX_H_MM) {
+      out.heightMm = undefined;
+    } else if (!hasH && Number.isFinite(qtyMm) && Math.abs(out.heightMm - qtyMm) <= tol) {
+      // raw に H/高さ/立上り/糸尺 の根拠が無いのに qty*1000 に近い → 誤爆
+      out.heightMm = undefined;
+    }
+  }
+
+  // wide/length に qty*1000 が入る誤爆も一応潰す（同条件）
+  if (out.wideMm != null) {
+    if (out.wideMm > 50000) {
+      out.wideMm = undefined;
+    } else if (Number.isFinite(qtyMm) && Math.abs(out.wideMm - qtyMm) <= tol) {
+      out.wideMm = undefined;
+    }
+  }
+  if (out.lengthMm != null) {
+    if (out.lengthMm > 50000) {
+      out.lengthMm = undefined;
+    } else if (Number.isFinite(qtyMm) && Math.abs(out.lengthMm - qtyMm) <= tol) {
+      out.lengthMm = undefined;
+    }
+  }
+
+  return out;
+}
+
 // unit=箇所 / その他 → 「使用(㎡/単位)」を決める（wide×lengthが取れたら面積）
 function suggestedInputForArea(size: SizeResult): number | null {
   if (size.wideMm != null && size.lengthMm != null) {
@@ -717,7 +784,18 @@ export async function POST(req: Request) {
     let unitCol = detected.unit;
     let amountCol = detected.amount;
     let headerRowIndex: number | null = detected.headerRowIndex;
-    let sizeTextCol = detected.sizeText;
+    // ★ sizeText が未検出(undefined)のときは null（未指定）に明示
+    // ★ auto検出の sizeText は信用しない（manual / fallback で確定させる）
+    // auto検出は参考値。manual指定があれば必ず manual を採用する
+    let sizeTextCol: number | null =
+      typeof detected.sizeText === "number" ? detected.sizeText : null;
+    if (useManualCols && (sizeTextCol == null || sizeTextCol < 0)) {
+      throw new Error("sizeCol（サイズ列）が未指定です。列指定ON時は必須です。");
+    }
+    // ★ auto検出で qty と同じ列なら無効化するが、manual指定は絶対に殺さない
+    if (!useManualCols && sizeTextCol != null && sizeTextCol === qtyCol) {
+      sizeTextCol = null;
+    }
 
     if (useManualCols) {
       const hr = read1BasedRow(fd, "headerRowIndex");
@@ -744,13 +822,36 @@ export async function POST(req: Request) {
       qtyCol = clampColIndex(mq, maxCols);
       unitCol = clampColIndex(mu, maxCols);
       amountCol = ma == null ? null : clampColIndex(ma, maxCols);
-      sizeTextCol = clampColIndex(ms, maxCols);
+      sizeTextCol = clampColIndex(ms, maxCols); // ★ manual 指定を絶対採用
+
+      // ★ デバッグ用：手指定 sizeCol を必ず反映させる
+      // ここで sizeTextCol は null / undefined になってはいけない
+      if (sizeTextCol == null) {
+        throw new Error("sizeCol の manual 指定が反映されていません（null）");
+      }
+
+      // ★ sizeCol が qtyCol と同じならエラーにする（数量誤爆防止）
+      if (sizeTextCol != null && sizeTextCol === qtyCol) {
+        const res: ExcelSumError = {
+          ok: false,
+          error: "sizeCol（サイズ列）が数量列(qtyCol)と同じです。列指定を確認してください。",
+        };
+        return NextResponse.json(res, { status: 400 });
+      }
 
       if (hideZeroAmount && amountCol == null) {
         const res: ExcelSumError = {
           ok: false,
           error:
             "「金額0/空除外」をONにする場合、amountCol（金額列）の指定が必要です",
+        };
+        return NextResponse.json(res, { status: 400 });
+      }
+      // ★ sizeCol は必須（qty等を誤読させないため）
+      if (sizeTextCol == null || sizeTextCol < 0) {
+        const res: ExcelSumError = {
+          ok: false,
+          error: "sizeCol（サイズ列）が正しく指定されていません",
         };
         return NextResponse.json(res, { status: 400 });
       }
@@ -811,12 +912,11 @@ export async function POST(req: Request) {
 
       const itemTextAll = normalizeText(toStr(r[itemCol]));
       const descTextAll = normalizeText(toStr(r[descCol]));
-      const sizeTextColRaw = normalizeText(toStr(r[sizeTextCol]));
+      const sizeTextColRaw =
+        sizeTextCol >= 0 ? normalizeText(toStr(r[sizeTextCol])) : "";
 
       // ✅ AIに渡すテキスト：品名 + 摘要 + サイズ列
-      const sizeTextJoined = normalizeText(
-        [itemTextAll, descTextAll, sizeTextColRaw].filter((x) => x).join(" "),
-      );
+      const sizeTextJoined = normalizeText(sizeTextColRaw);
 
       const rowIndex1Based = i + 1;
 
@@ -857,7 +957,7 @@ export async function POST(req: Request) {
         sumM2 += qty;
       }
 
-      if (useAiSize && sizeTextJoined) {
+      if (useAiSize && sizeTextJoined && sizeTextCol >= 0) {
         pendingAi.push({ id: idx, text: sizeTextJoined, unit, qty });
       }
     }
@@ -878,6 +978,29 @@ export async function POST(req: Request) {
 
         // ✅ AIが落とした「重ね/かさね」を確実に拾う（ここが“足せてない”の主因）
         applyHardFallbackFromText(row);
+
+        // ✅ AI値のサニタイズ（テキスト根拠のない length=wide や qty→mm誤爆を除去）
+        {
+          const base: SizeResult = {
+            heightMm: row.heightMm,
+            wideMm: row.wideMm,
+            lengthMm: row.lengthMm,
+            overlapMm: row.overlapMm,
+            suggestedInput: row.suggestedInput,
+            calcM2: row.calcM2,
+          };
+
+          // 1) Wだけなのに Lまで同値で埋めた…等を修正
+          let s1 = sanitizeAiSizeByText(base, row._rawSizeText);
+
+          // 2) qty(m) がそのまま高さmmになった事故（例: qty=58.8 → heightMm=58800）を除去
+          s1 = sanitizeSuspiciousMmFromQty(row._unitNormalized, row._qty, row._rawSizeText, s1);
+
+          row.heightMm = s1.heightMm;
+          row.wideMm = s1.wideMm;
+          row.lengthMm = s1.lengthMm;
+          row.overlapMm = s1.overlapMm;
+        }
 
         // suggestedInput / calcM2 は AI を最優先。ただし、AIが省略した場合は最小限の確定計算で穴埋めする。
         if (sz.suggestedInput != null) row.suggestedInput = sz.suggestedInput;
@@ -966,6 +1089,10 @@ export async function POST(req: Request) {
       sizeFromAi: r.sizeFromAi,
     }));
 
+    // ★ 最終的に使用した sizeTextCol を確定させる（manual優先）
+    const resolvedSizeTextCol =
+      typeof sizeTextCol === "number" ? sizeTextCol : null;
+
     const res: ExcelSumResponse = {
       ok: true,
       query,
@@ -973,14 +1100,18 @@ export async function POST(req: Request) {
       sumsByUnit,
       sumM2,
       detectedCols: {
-        item: itemCol,
-        desc: descCol,
-        qty: qtyCol,
-        unit: unitCol,
-        amount: amountCol,
-        headerRowIndex,
+        // 返却は 1-based
+        item: itemCol + 1,
+        desc: descCol + 1,
+        qty: qtyCol + 1,
+        unit: unitCol + 1,
+        amount: amountCol == null ? null : amountCol + 1,
+        headerRowIndex: headerRowIndex == null ? null : headerRowIndex + 1,
         usedManualCols: useManualCols,
-        sizeText: sizeTextCol,
+
+        // 互換: size は sizeText と同じ値を返す
+        size: resolvedSizeTextCol == null ? null : resolvedSizeTextCol + 1,
+        sizeText: resolvedSizeTextCol == null ? null : resolvedSizeTextCol + 1,
       },
       preview,
     };

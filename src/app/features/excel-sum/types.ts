@@ -31,6 +31,12 @@ export type ExcelSumOk = {
     amount: number | null;
     headerRowIndex: number | null;
     usedManualCols: boolean;
+
+    // サイズ列（API実装差分の吸収用）
+    // - 旧: size
+    // - 新: sizeText
+    size?: number | null;
+    sizeText?: number | null;
   };
 };
 
@@ -69,6 +75,11 @@ export type DetectColsResponse = {
     qty: number; // 1-based
     unit: number; // 1-based
     amount: number | null; // 1-based or null
-    size: number; // 1-based
+
+    // サイズ列（API実装差分の吸収用）
+    // - 旧: size
+    // - 新: sizeText
+    size?: number | null; // 1-based or null
+    sizeText?: number | null; // 1-based or null
   };
 };

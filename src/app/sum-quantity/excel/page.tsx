@@ -26,7 +26,6 @@ import {
   formatSize,
   guessDefaultCalcM,
   guessDefaultCalcM2PerEach,
-  shouldDisableAutoSize,
 } from "@/app/features/excel-sum/size";
 
 import {
@@ -680,38 +679,72 @@ export default function Page() {
     return null;
   }, []);
 
-  // ✅ デフォルトの「使用(m)」をフロント側でも確実に算出する
-  // - heightMm + overlapMm が取れているなら必ず加算して m にする
-  // - 取れない場合のみ既存の推定関数へフォールバック
-  const getDefaultMForRow = useCallback((r: ExcelSumPreviewRow): number | null => {
-    const h = typeof r.heightMm === "number" && Number.isFinite(r.heightMm) ? r.heightMm : null;
-    const o = typeof r.overlapMm === "number" && Number.isFinite(r.overlapMm) ? r.overlapMm : null;
+  // ✅ デフォルトの「使用(m)」をフロント側でも確実に算出する（新：hasExplicitSizeTextフラグ対応）
+  const getDefaultMForRow = useCallback(
+    (r: ExcelSumPreviewRow, hasExplicitSizeText: boolean): number | null => {
+      // ✅ サイズ文字列が無いのに heightMm 等だけが入っているケースは信用しない
+      // （列ズレ/誤抽出で qty がサイズ扱いになるのを防ぐ）
+      if (!hasExplicitSizeText) {
+        return guessDefaultCalcM(r);
+      }
 
-    if (h != null) {
-      const mm = h + (o ?? 0);
-      if (mm <= 0) return null;
-      // 小数が暴れないよう 3桁で丸め
-      return Number((mm / 1000).toFixed(3));
-    }
+      // ✅ ガード：数量(m)を誤って「H=...」として拾ってしまうケースを弾く
+      // 例）数量=58.8m → H=58800mm のような異常値
+      const MAX_HEIGHT_MM = 5000; // 立上り等の現実的上限（必要なら後で調整）
 
-    return guessDefaultCalcM(r);
-  }, []);
+      const h =
+        typeof r.heightMm === "number" && Number.isFinite(r.heightMm)
+          ? r.heightMm
+          : null;
+      const o =
+        typeof r.overlapMm === "number" && Number.isFinite(r.overlapMm)
+          ? r.overlapMm
+          : null;
 
-  // ✅ 箇所のデフォルト（㎡/箇所）
-  // - wideMm × lengthMm が取れているなら ㎡ にする
-  // - 取れない場合のみ既存の推定関数へフォールバック
-  const getDefaultM2EachForRow = useCallback((r: ExcelSumPreviewRow): number | null => {
-    const w = typeof r.wideMm === "number" && Number.isFinite(r.wideMm) ? r.wideMm : null;
-    const l = typeof r.lengthMm === "number" && Number.isFinite(r.lengthMm) ? r.lengthMm : null;
+      if (h != null) {
+        // 異常に大きいHは無効扱いにして推定へフォールバック
+        if (h <= 0 || h > MAX_HEIGHT_MM) {
+          return guessDefaultCalcM(r);
+        }
 
-    if (w != null && l != null) {
-      const m2 = (w * l) / 1_000_000;
-      if (m2 <= 0) return null;
-      return Number(m2.toFixed(3));
-    }
+        const mm = h + (o ?? 0);
+        if (mm <= 0) return null;
+        // 小数が暴れないよう 3桁で丸め
+        return Number((mm / 1000).toFixed(3));
+      }
 
-    return guessDefaultCalcM2PerEach(r);
-  }, []);
+      return guessDefaultCalcM(r);
+    },
+    [],
+  );
+
+  // ✅ 箇所のデフォルト（㎡/箇所）（新：hasExplicitSizeTextフラグ対応）
+  const getDefaultM2EachForRow = useCallback(
+    (r: ExcelSumPreviewRow, hasExplicitSizeText: boolean): number | null => {
+      // ✅ サイズ文字列が無いのに wide/length だけが入っているケースは信用しない
+      if (!hasExplicitSizeText) {
+        return guessDefaultCalcM2PerEach(r);
+      }
+
+      const w =
+        typeof r.wideMm === "number" && Number.isFinite(r.wideMm)
+          ? r.wideMm
+          : null;
+      const l =
+        typeof r.lengthMm === "number" && Number.isFinite(r.lengthMm)
+          ? r.lengthMm
+          : null;
+
+      if (w != null && l != null) {
+        const m2 = (w * l) / 1_000_000;
+        if (m2 <= 0) return null;
+        return Number(m2.toFixed(3));
+      }
+
+      return guessDefaultCalcM2PerEach(r);
+    },
+    [],
+  );
 
   // ✅ 入力1つで㎡換算（m / 箇所 / その他）＋ ㎡はそのまま
   const calcM2FromInputOrExisting = useCallback(
@@ -730,7 +763,8 @@ export default function Page() {
 
       // (A) m → 入力(m)で qty(m) * m
       if (unit === "m") {
-        const m = n ?? getDefaultMForRow(r);
+        const hasExplicitSizeText = Boolean(formatSize(r));
+        const m = n ?? getDefaultMForRow(r, hasExplicitSizeText);
         if (m == null) return null;
         if (m === 0) return 0;
         const m2 = r.qty * m;
@@ -739,7 +773,8 @@ export default function Page() {
 
       // (B) 箇所 → 入力(㎡/箇所)で qty(箇所) * (㎡/箇所)
       if (unit === "箇所") {
-        const m2Each = n ?? getDefaultM2EachForRow(r);
+        const hasExplicitSizeText = Boolean(formatSize(r));
+        const m2Each = n ?? getDefaultM2EachForRow(r, hasExplicitSizeText);
         if (m2Each == null) return null;
         if (m2Each === 0) return 0;
         const m2 = r.qty * m2Each;
@@ -776,9 +811,28 @@ export default function Page() {
 
     // m → 入力(m) or 推定(m)
     if (unit === "m") {
-      const m = n ?? (typeof r.heightMm === "number" && Number.isFinite(r.heightMm)
-        ? Number(((r.heightMm + (typeof r.overlapMm === "number" && Number.isFinite(r.overlapMm) ? r.overlapMm : 0)) / 1000).toFixed(3))
-        : guessDefaultCalcM(r));
+      const MAX_HEIGHT_MM = 5000;
+
+      const hasExplicitSizeText = Boolean(formatSize(r));
+
+      const m =
+        n ??
+        (hasExplicitSizeText &&
+        typeof r.heightMm === "number" &&
+        Number.isFinite(r.heightMm) &&
+        r.heightMm > 0 &&
+        r.heightMm <= MAX_HEIGHT_MM
+          ? Number(
+              (
+                (r.heightMm +
+                  (typeof r.overlapMm === "number" &&
+                  Number.isFinite(r.overlapMm)
+                    ? r.overlapMm
+                    : 0)) /
+                1000
+              ).toFixed(3),
+            )
+          : guessDefaultCalcM(r));
       if (m == null) return null;
       if (m === 0) return 0;
       const m2 = r.qty * m;
@@ -787,9 +841,17 @@ export default function Page() {
 
     // 箇所 → 入力(㎡/箇所) or 推定(㎡/箇所)
     if (unit === "箇所") {
-      const m2Each = n ?? (typeof r.wideMm === "number" && Number.isFinite(r.wideMm) && typeof r.lengthMm === "number" && Number.isFinite(r.lengthMm)
-        ? Number((((r.wideMm * r.lengthMm) / 1_000_000)).toFixed(3))
-        : guessDefaultCalcM2PerEach(r));
+      const hasExplicitSizeText = Boolean(formatSize(r));
+
+      const m2Each =
+        n ??
+        (hasExplicitSizeText &&
+        typeof r.wideMm === "number" &&
+        Number.isFinite(r.wideMm) &&
+        typeof r.lengthMm === "number" &&
+        Number.isFinite(r.lengthMm)
+          ? Number(((r.wideMm * r.lengthMm) / 1_000_000).toFixed(3))
+          : guessDefaultCalcM2PerEach(r));
       if (m2Each == null) return null;
       if (m2Each === 0) return 0;
       const m2 = r.qty * m2Each;
@@ -872,7 +934,9 @@ export default function Page() {
     <main className="max-w-4xl mx-auto p-4 space-y-6 min-h-screen bg-gray-100 dark:bg-gray-950 text-gray-900 dark:text-gray-100">
       {/* Excel */}
       <section className="rounded-lg border bg-white p-4 dark:border-gray-800 dark:bg-gray-900 space-y-3">
-        <div className="text-sm font-extrabold">Excel 集計（仕様コードで合算）</div>
+        <div className="text-sm font-extrabold">
+          Excel 集計（仕様コードで合算）
+        </div>
 
         <div className="flex items-center gap-3">
           <label
@@ -935,7 +999,8 @@ export default function Page() {
             )}
 
             <div className="text-[11px] opacity-80">
-              ※ 先頭が「鏡」シートでも、明細が入っているシートを選べば集計できます
+              ※
+              先頭が「鏡」シートでも、明細が入っているシートを選べば集計できます
             </div>
           </div>
         ) : null}
@@ -964,7 +1029,8 @@ export default function Page() {
                 ) : null}
               </div>
               <div className="mt-1 text-[11px] opacity-80">
-                ※ 列番号は「結合セルを1つとして数える」のではなく、Excel上の実セル（A=1,
+                ※
+                列番号は「結合セルを1つとして数える」のではなく、Excel上の実セル（A=1,
                 B=2, C=3...）の位置で数えて入力してください
               </div>
 
@@ -994,7 +1060,8 @@ export default function Page() {
                       inputMode="numeric"
                     />
                     <div className="text-[11px] opacity-70">
-                      ※ サイズ列の抽出を100%AIに任せます（多すぎると遅くなるため上限あり）
+                      ※
+                      サイズ列の抽出を100%AIに任せます（多すぎると遅くなるため上限あり）
                     </div>
                   </div>
                 </div>
@@ -1087,7 +1154,8 @@ export default function Page() {
                 </div>
 
                 <div className="mt-1 text-[11px] opacity-80">
-                  ※ サイズが摘要以外（備考など）に入る明細書があるため、この列からサイズを拾います
+                  ※
+                  サイズが摘要以外（備考など）に入る明細書があるため、この列からサイズを拾います
                 </div>
                 {manualColsError ? (
                   <div className="mt-2 text-sm text-red-600 dark:text-red-400">
@@ -1296,6 +1364,37 @@ export default function Page() {
               </span>
             </div>
 
+            {/* ✅ デバッグ：列指定（送信値）と API が解釈した列（返却値）を並べて確認 */}
+            <div className="rounded border p-3 dark:border-gray-800">
+              <div className="text-xs font-bold mb-2">
+                デバッグ：列指定の一致確認
+              </div>
+
+              <div className="text-[11px] opacity-80">
+                送信（手入力 / 1始まり）：
+                <span className="ml-2 font-extrabold">
+                  item={itemCol1Based || "-"}, desc={descCol1Based || "-"}, qty=
+                  {qtyCol1Based || "-"}, unit={unitCol1Based || "-"}, size=
+                  {sizeCol1Based || "-"}
+                  {hideZeroAmount ? `, amount=${amountCol1Based || "-"}` : ""}
+                </span>
+              </div>
+
+              <div className="mt-2 text-[11px] opacity-80">
+                API返却（detectedCols）：
+                <span className="ml-2 font-extrabold">
+                  {excelResult.detectedCols
+                    ? `item=${excelResult.detectedCols.item}, desc=${excelResult.detectedCols.desc}, qty=${excelResult.detectedCols.qty}, unit=${excelResult.detectedCols.unit}, size=${excelResult.detectedCols.sizeText ?? excelResult.detectedCols.size ?? "-"}${excelResult.detectedCols.amount != null ? `, amount=${excelResult.detectedCols.amount}` : ""}`
+                    : "（なし）"}
+                </span>
+              </div>
+
+              <div className="mt-2 text-[11px] opacity-70">
+                ※ ここで size が qty
+                と同じ列になっていたら「サイズ列に数量列が入っている」状態です（1-based⇔0-based変換や列ズレの疑い）。
+              </div>
+            </div>
+
             <div className="rounded border p-3 dark:border-gray-800">
               <div className="text-xs font-bold mb-2">単位別合計</div>
               <ul className="text-sm space-y-1">
@@ -1303,7 +1402,9 @@ export default function Page() {
                   <li key={unit} className="flex justify-between">
                     <span className="font-bold">{unit}</span>
                     <span className="font-extrabold">
-                      {typeof sum === "number" ? formatNumber(sum) : String(sum)}
+                      {typeof sum === "number"
+                        ? formatNumber(sum)
+                        : String(sum)}
                     </span>
                   </li>
                 ))}
@@ -1359,24 +1460,27 @@ export default function Page() {
                   <tbody>
                     {excelResult.preview.map((r) => {
                       const size = formatSize(r);
+                      const hasExplicitSizeText = Boolean(size);
                       const unit = normalizeUnit(r.unit ?? "");
                       const isM = unit === "m";
                       const isKasho = unit === "箇所";
                       const isM2 = unit === "㎡";
-                      const isOtherUnit = !isM && !isKasho && !isM2;
 
-                      const defaultM = getDefaultMForRow(r);
-                      const defaultM2Each = getDefaultM2EachForRow(r);
+                      const defaultM = getDefaultMForRow(
+                        r,
+                        hasExplicitSizeText,
+                      );
+                      const defaultM2Each = getDefaultM2EachForRow(
+                        r,
+                        hasExplicitSizeText,
+                      );
 
                       const input = calcMmByRow[r.rowIndex] ?? "";
                       const n = toPositiveNumberOrNull(input);
 
-                      const adoptedM = isM ? (n ?? defaultM) : null;
-                      const adoptedM2Each = isKasho ? (n ?? defaultM2Each) : null;
-                      const adoptedM2PerUnit = isOtherUnit ? n : null;
-
                       const m2 = calcM2FromInputOrExisting(r);
-                      const showM2 = typeof m2 === "number" && Number.isFinite(m2);
+                      const showM2 =
+                        typeof m2 === "number" && Number.isFinite(m2);
 
                       const alreadyM2 = isM2 ? getM2Already(r) : null;
 
@@ -1391,7 +1495,9 @@ export default function Page() {
                             {r.desc ?? "-"}
                           </td>
                           <td className="py-2 pr-2">
-                            {typeof r.qty === "number" ? formatNumber(r.qty) : "-"}
+                            {typeof r.qty === "number"
+                              ? formatNumber(r.qty)
+                              : "-"}
                           </td>
                           <td className="py-2 pr-2">{r.unit ?? "-"}</td>
 
@@ -1405,8 +1511,6 @@ export default function Page() {
                                 {!isM2 && (
                                   <>
                                     <div className="flex items-center gap-1">
-                                  
-
                                       <input
                                         value={input}
                                         onChange={(e) => {
@@ -1429,8 +1533,6 @@ export default function Page() {
                                               : "例:0.30"
                                         }
                                       />
-
-
                                     </div>
 
                                     {isM && n != null && n >= 1 ? (
@@ -1443,7 +1545,9 @@ export default function Page() {
 
                                 {isM2 ? (
                                   <span className="text-[11px] opacity-70 whitespace-nowrap">
-                                    {alreadyM2 != null ? `（㎡=${alreadyM2}）` : ""}
+                                    {alreadyM2 != null
+                                      ? `（㎡=${alreadyM2}）`
+                                      : ""}
                                   </span>
                                 ) : null}
                               </div>
@@ -1457,9 +1561,10 @@ export default function Page() {
                             <button
                               type="button"
                               onClick={() => {
-                                const ok = window.confirm(
-                                  "この行を削除します。よろしいですか？",
-                                );
+                                const ok =
+                                  window.confirm(
+                                    "この行を削除します。よろしいですか？",
+                                  );
                                 if (!ok) return;
 
                                 setCalcMmByRow((prevCalc) => {
@@ -1474,9 +1579,13 @@ export default function Page() {
                                     const nextPreview = prev.preview.filter(
                                       (x) => x.rowIndex !== r.rowIndex,
                                     );
-                                    const nextSums = recomputeSumsByUnit(nextPreview);
+                                    const nextSums =
+                                      recomputeSumsByUnit(nextPreview);
                                     const nextSumM2Client =
-                                      computeSumM2ClientWithMap(nextPreview, nextCalc);
+                                      computeSumM2ClientWithMap(
+                                        nextPreview,
+                                        nextCalc,
+                                      );
 
                                     return {
                                       ...prev,
@@ -1513,7 +1622,9 @@ export default function Page() {
 
           <button
             onClick={() => {
-              const ok = window.confirm("保存履歴を全削除します。よろしいですか？");
+              const ok = window.confirm(
+                "保存履歴を全削除します。よろしいですか？",
+              );
               if (!ok) return;
               const next: SavedExcelSum[] = [];
               setSavedSums(next);
@@ -1586,7 +1697,8 @@ export default function Page() {
         )}
 
         <div className="text-[11px] opacity-70">
-          ※ 保存されるのは「キーワード1」「キーワード2」「表示中の㎡換算合計」です（端末のローカル保存）。
+          ※
+          保存されるのは「キーワード1」「キーワード2」「表示中の㎡換算合計」です（端末のローカル保存）。
         </div>
       </section>
     </main>
