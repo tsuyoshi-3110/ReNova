@@ -12,7 +12,7 @@ export default function ProjectManagementPageInner() {
       <div className="mx-auto w-full max-w-3xl">
         <div className="rounded-2xl border bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-900">
           <h1 className="text-2xl font-extrabold text-gray-900 dark:text-gray-100">
-            工程管理
+            工程表
           </h1>
           <p className="mt-2 text-sm font-semibold text-gray-600 dark:text-gray-300">
             工程表の作成や、歩掛り設定をここから操作します。

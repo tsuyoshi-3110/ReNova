@@ -41,6 +41,17 @@ function normalizeDigits(input: string): string {
   );
 }
 
+function normalizeForSearch(input: string): string {
+  // ✅ NFKC: 半角カナ→全角カナ、全角英数→半角、濁点結合などを正規化
+  const nfkc = input.normalize("NFKC");
+
+  return nfkc
+    .replace(/\s+/g, "")         // 空白除去
+    .replace(/[－―ー−]/g, "-")   // ハイフン統一
+    .replace(/＝/g, "=")         // 全角=を半角へ
+    .toLowerCase();              // 小文字化（英字対策）
+}
+
 /**
  * 1行あたりの「推定㎡」を出すヘルパー
  * - まずは AI が返した estimated_area_m2 を優先的に使用

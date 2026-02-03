@@ -38,11 +38,10 @@ export default function Navbar() {
 
   const menuLinks = useMemo(
     () => [
-      { href: "/project-management", label: "工程管理" },
+      { href: "/project-management", label: "工程表" },
       { href: "/proclink", label: "写真管理" },
+      { href: "/sum-quantity", label: "材料積算" },
       { href: "/board-settings", label: "掲示板" },
-      { href: "/materials", label: "材料積算" },
-      { href: "/renova/pdf-test", label: "PDF解析" },
     ],
     [],
   );

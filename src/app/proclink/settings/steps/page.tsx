@@ -488,8 +488,8 @@ export default function WorkSettingsPage() {
     try {
       await deleteDoc(doc(db, COL_CODES, id)).catch(() => {});
       await deleteDoc(doc(db, COL_TEMPLATES, id)).catch(() => {});
-      alert("削除しました");
       await loadTemplatesMeta();
+      // UIメッセージ「削除しました」は表示しない
     } catch (e) {
       console.error(e);
       alert("削除に失敗しました（コンソール確認）");

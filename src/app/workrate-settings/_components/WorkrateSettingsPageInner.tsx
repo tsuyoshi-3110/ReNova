@@ -76,19 +76,21 @@ export default function WorkrateSettingsPageInner() {
         if (Array.isArray(rawSettings)) {
           const settings = rawSettings as WorkrateSettingResponse[];
 
-          initialRows = settings.map((s): WorkrateRow => ({
-            category: s.category ?? "",
-            main_type: s.main_type ?? "",
-            unit: s.unit ?? "",
-            houkake:
-              s.houkake !== undefined && s.houkake !== null
-                ? String(s.houkake)
-                : "",
-            workers:
-              s.workers !== undefined && s.workers !== null
-                ? String(s.workers)
-                : "",
-          }));
+          initialRows = settings.map(
+            (s): WorkrateRow => ({
+              category: s.category ?? "",
+              main_type: s.main_type ?? "",
+              unit: s.unit ?? "",
+              houkake:
+                s.houkake !== undefined && s.houkake !== null
+                  ? String(s.houkake)
+                  : "",
+              workers:
+                s.workers !== undefined && s.workers !== null
+                  ? String(s.workers)
+                  : "",
+            }),
+          );
         }
 
         setRows(initialRows);
@@ -147,8 +149,6 @@ export default function WorkrateSettingsPageInner() {
       if (!res.ok) {
         throw new Error(data.detail || data.error || "保存に失敗しました。");
       }
-
-      setSavedMessage("保存しました。PDF解析画面で自動入力されます。");
     } catch (e) {
       console.error("save workrate settings error:", e);
       setError("保存に失敗しました。");
@@ -226,9 +226,7 @@ export default function WorkrateSettingsPageInner() {
                     <select
                       className="border rounded px-2 py-1 text-xs"
                       value={row.unit}
-                      onChange={(e) =>
-                        updateRow(idx, { unit: e.target.value })
-                      }
+                      onChange={(e) => updateRow(idx, { unit: e.target.value })}
                     >
                       <option value="">選択</option>
                       {UNIT_OPTIONS.map((u) => (
