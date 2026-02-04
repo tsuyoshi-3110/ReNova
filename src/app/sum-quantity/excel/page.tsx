@@ -683,9 +683,9 @@ export default function Page() {
   const getDefaultMForRow = useCallback(
     (r: ExcelSumPreviewRow, hasExplicitSizeText: boolean): number | null => {
       // ✅ サイズ文字列が無いのに heightMm 等だけが入っているケースは信用しない
-      // （列ズレ/誤抽出で qty がサイズ扱いになるのを防ぐ）
+      // ✅ 箇所は事故が多いので、自動推定はしない（入力必須）
       if (!hasExplicitSizeText) {
-        return guessDefaultCalcM(r);
+        return null;
       }
 
       // ✅ ガード：数量(m)を誤って「H=...」として拾ってしまうケースを弾く
@@ -721,9 +721,10 @@ export default function Page() {
   // ✅ 箇所のデフォルト（㎡/箇所）（新：hasExplicitSizeTextフラグ対応）
   const getDefaultM2EachForRow = useCallback(
     (r: ExcelSumPreviewRow, hasExplicitSizeText: boolean): number | null => {
-      // ✅ サイズ文字列が無いのに wide/length だけが入っているケースは信用しない
+      // ✅ 方針：m 以外はサイズ自動抽出しない
+      // 箇所は事故が多いので、サイズ文字列が無い場合は自動推定しない（入力必須）
       if (!hasExplicitSizeText) {
-        return guessDefaultCalcM2PerEach(r);
+        return null;
       }
 
       const w =
@@ -741,7 +742,8 @@ export default function Page() {
         return Number(m2.toFixed(3));
       }
 
-      return guessDefaultCalcM2PerEach(r);
+      // 明示サイズが無いなら上で null。ここも推定はしない。
+      return null;
     },
     [],
   );
@@ -771,13 +773,11 @@ export default function Page() {
         return Number.isFinite(m2) ? m2 : null;
       }
 
-      // (B) 箇所 → 入力(㎡/箇所)で qty(箇所) * (㎡/箇所)
+      // (B) 箇所 → 入力(㎡/箇所)のみ（自動推定しない）
       if (unit === "箇所") {
-        const hasExplicitSizeText = Boolean(formatSize(r));
-        const m2Each = n ?? getDefaultM2EachForRow(r, hasExplicitSizeText);
-        if (m2Each == null) return null;
-        if (m2Each === 0) return 0;
-        const m2 = r.qty * m2Each;
+        if (n == null) return null;
+        if (n === 0) return 0;
+        const m2 = r.qty * n;
         return Number.isFinite(m2) ? m2 : null;
       }
 
@@ -839,22 +839,11 @@ export default function Page() {
       return Number.isFinite(m2) ? m2 : null;
     }
 
-    // 箇所 → 入力(㎡/箇所) or 推定(㎡/箇所)
+    // 箇所 → 入力(㎡/箇所)のみ（推定しない）
     if (unit === "箇所") {
-      const hasExplicitSizeText = Boolean(formatSize(r));
-
-      const m2Each =
-        n ??
-        (hasExplicitSizeText &&
-        typeof r.wideMm === "number" &&
-        Number.isFinite(r.wideMm) &&
-        typeof r.lengthMm === "number" &&
-        Number.isFinite(r.lengthMm)
-          ? Number(((r.wideMm * r.lengthMm) / 1_000_000).toFixed(3))
-          : guessDefaultCalcM2PerEach(r));
-      if (m2Each == null) return null;
-      if (m2Each === 0) return 0;
-      const m2 = r.qty * m2Each;
+      if (n == null) return null;
+      if (n === 0) return 0;
+      const m2 = r.qty * n;
       return Number.isFinite(m2) ? m2 : null;
     }
 
@@ -1364,37 +1353,6 @@ export default function Page() {
               </span>
             </div>
 
-            {/* ✅ デバッグ：列指定（送信値）と API が解釈した列（返却値）を並べて確認 */}
-            <div className="rounded border p-3 dark:border-gray-800">
-              <div className="text-xs font-bold mb-2">
-                デバッグ：列指定の一致確認
-              </div>
-
-              <div className="text-[11px] opacity-80">
-                送信（手入力 / 1始まり）：
-                <span className="ml-2 font-extrabold">
-                  item={itemCol1Based || "-"}, desc={descCol1Based || "-"}, qty=
-                  {qtyCol1Based || "-"}, unit={unitCol1Based || "-"}, size=
-                  {sizeCol1Based || "-"}
-                  {hideZeroAmount ? `, amount=${amountCol1Based || "-"}` : ""}
-                </span>
-              </div>
-
-              <div className="mt-2 text-[11px] opacity-80">
-                API返却（detectedCols）：
-                <span className="ml-2 font-extrabold">
-                  {excelResult.detectedCols
-                    ? `item=${excelResult.detectedCols.item}, desc=${excelResult.detectedCols.desc}, qty=${excelResult.detectedCols.qty}, unit=${excelResult.detectedCols.unit}, size=${excelResult.detectedCols.sizeText ?? excelResult.detectedCols.size ?? "-"}${excelResult.detectedCols.amount != null ? `, amount=${excelResult.detectedCols.amount}` : ""}`
-                    : "（なし）"}
-                </span>
-              </div>
-
-              <div className="mt-2 text-[11px] opacity-70">
-                ※ ここで size が qty
-                と同じ列になっていたら「サイズ列に数量列が入っている」状態です（1-based⇔0-based変換や列ズレの疑い）。
-              </div>
-            </div>
-
             <div className="rounded border p-3 dark:border-gray-800">
               <div className="text-xs font-bold mb-2">単位別合計</div>
               <ul className="text-sm space-y-1">
@@ -1459,18 +1417,23 @@ export default function Page() {
                   </thead>
                   <tbody>
                     {excelResult.preview.map((r) => {
-                      const size = formatSize(r);
-                      const hasExplicitSizeText = Boolean(size);
-                      const unit = normalizeUnit(r.unit ?? "");
-                      const isM = unit === "m";
-                      const isKasho = unit === "箇所";
-                      const isM2 = unit === "㎡";
+                      const rawUnit = (r.unit ?? "").normalize("NFKC");
+                      const unitNorm = normalizeUnit(rawUnit);
+
+                      // ✅ m 行の判定を厳格化（"ヶ所" 等の誤判定を潰す）
+                      const isM =
+                        unitNorm === "m" &&
+                        /m/i.test(rawUnit) &&
+                        !/[ヶ箇]/.test(rawUnit);
+
+                      const isKasho = unitNorm === "箇所" || /[ヶ箇]所/.test(rawUnit);
+                      const isM2 = unitNorm === "㎡";
+
+                      // ✅ 寸法は m の行だけ計算＆表示
+                      const sizeForDisplay = isM ? formatSize(r) : "";
+                      const hasExplicitSizeText = Boolean(sizeForDisplay);
 
                       const defaultM = getDefaultMForRow(
-                        r,
-                        hasExplicitSizeText,
-                      );
-                      const defaultM2Each = getDefaultM2EachForRow(
                         r,
                         hasExplicitSizeText,
                       );
@@ -1504,7 +1467,7 @@ export default function Page() {
                           <td className="py-2 pr-2">
                             <div className="grid grid-cols-[150px_1fr] items-center gap-2">
                               <span className="block w-[150px] truncate whitespace-nowrap">
-                                {size ? size : "-"}
+                                {sizeForDisplay ? sizeForDisplay : "-"}
                               </span>
 
                               <div className="flex items-center gap-2">
@@ -1527,9 +1490,7 @@ export default function Page() {
                                               ? String(defaultM)
                                               : "例:0.1"
                                             : isKasho
-                                              ? defaultM2Each != null
-                                                ? String(defaultM2Each)
-                                                : "例:0.25"
+                                              ? "例:0.25"
                                               : "例:0.30"
                                         }
                                       />

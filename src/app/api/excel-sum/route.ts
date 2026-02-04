@@ -28,7 +28,7 @@ type ExcelSumResponse = {
   query: string;
   matchedCount: number;
   sumsByUnit: Record<string, number>;
-  sumM2: number; // m換算合計（unit が m / 箇所 / ㎡ の行）
+  sumM2: number; // m換算合計（unit が m の行 + unit=㎡ の行はそのまま加算）
   detectedCols: {
     // NOTE: 返却はすべて 1-based（UIの手入力と一致させる）
     item: number;
@@ -71,6 +71,7 @@ type ExcelSumResponse = {
     // 確認用（AIへ渡したテキスト）
     sizeText?: string;
     sizeFromAi?: boolean; // AI 100%運用ならtrue
+    autoSizeEnabled?: boolean; // unit=m の行だけ true（m以外は false）
   }>;
 };
 
@@ -170,6 +171,74 @@ function rowToJoinedText(row: unknown[]): string {
   return normalizeText(parts.join(" "));
 }
 
+// サイズ列に「×」だけ入っている等の“無効マーク”はサイズ抽出に使わない
+// 注意: 300×300 のような寸法表記は有効なので除外しない
+function hasDimensionPairText(raw: string): boolean {
+  const t = normalizeText(raw);
+  if (!t) return false;
+  // 300×300 / 300x300 / 300X300 / 300＊300 など
+  return /(\d{2,5})\s*[×xX＊*]\s*(\d{2,5})/.test(t);
+}
+
+function hasAnySizeKeyword(raw: string): boolean {
+  const t = normalizeText(raw);
+  if (!t) return false;
+  // H/W/L/高さ/巾/幅/長さ/立上り/糸尺/重ね/かさね など
+  return /(\bH\b|\bW\b|\bL\b|高さ|立上り|糸尺|幅|巾|長さ|重ね|かさね|カサネ)/i.test(
+    t,
+  );
+}
+
+// 「全体→約4m2」「合計 12㎡」「No.8に含む」など“全体量/別行に内包”の記述がある場合、
+// そのセル内の 300×300 等を拾って換算すると二重計上/誤計算になりやすい。
+// → 寸法ペア(300×300等) と 面積(㎡/m2) が同一セル内に共存し、かつ全体/含む系の語がある場合は
+//    サイズ抽出・換算の対象外にする。
+function hasAreaToken(raw: string): boolean {
+  const t = normalizeText(raw);
+  if (!t) return false;
+  // 4m2 / 4 m2 / 4㎡ / 4.5m2 など
+  return /(\d+(?:\.\d+)?)\s*(?:㎡|m2|m\^2|m²)/i.test(t);
+}
+
+function hasTotalOrIncludedHint(raw: string): boolean {
+  const t = normalizeText(raw);
+  if (!t) return false;
+  // 全体/合計/総/含む/一式 など
+  return /(全体|合計|総|含む|一式|no\.?\s*\d+)/i.test(t);
+}
+
+function shouldSkipSizeExtraction(raw: string): boolean {
+  const t = normalizeText(raw);
+  if (!t) return false;
+
+  // 例: "300×300/1ヶ所 *全体→約4m2 *No.8に含む" のようなケースを弾く
+  const hasPair = hasDimensionPairText(t);
+  const hasArea = hasAreaToken(t);
+  const hasHint = hasTotalOrIncludedHint(t);
+
+  return hasPair && hasArea && hasHint;
+}
+
+// 「✖︎」「✖️」「✖」が含まれる場合は、そのセルは“対象外”として扱う
+function hasInvalidCrossMark(raw: string): boolean {
+  // 正規化前の文字も拾えるよう、raw をそのまま見る
+  // U+2716 (✖) + variation selectors
+  return /✖[\uFE0E\uFE0F]?/.test(raw);
+}
+
+function isCrossOnlyMarker(raw: string): boolean {
+  // ✖ が混ざっているなら、そのセルは“対象外”
+  if (hasInvalidCrossMark(raw)) return true;
+
+  const t = normalizeText(raw);
+  if (!t) return false;
+
+  // セルが「×」だけ、または「××」などの記号だけの場合は無効
+  // （寸法表記や H/W/L 等の根拠がある場合は無効扱いにしない）
+  if (hasDimensionPairText(t) || hasAnySizeKeyword(t)) return false;
+  return /^×+$/.test(t);
+}
+
 /* =========================
    Manual Col Helpers (1-based -> 0-based)
 ========================= */
@@ -225,14 +294,19 @@ function extractHeightMmFromText(raw: string): number | undefined {
   if (!t) return undefined;
 
   // H=410 / H-410 / 高さ410 / 立上り410 / 糸尺=410
-  const m = t.match(/(?:\bH\s*[-=]?|高さ\s*[:=]?|立上り\s*[:=]?|糸尺\s*[:=]?)\s*(\d{1,5})/i);
+  const m = t.match(
+    /(?:\bH\s*[-=]?|高さ\s*[:=]?|立上り\s*[:=]?|糸尺\s*[:=]?)\s*(\d{1,5})/i,
+  );
   if (!m) return undefined;
   const n = Number(m[1]);
   if (!Number.isFinite(n) || n <= 0) return undefined;
   return clampMm(n);
 }
 
-function extractWideLengthMmFromText(raw: string): { wideMm?: number; lengthMm?: number } {
+function extractWideLengthMmFromText(raw: string): {
+  wideMm?: number;
+  lengthMm?: number;
+} {
   const t = normalizeText(raw);
   if (!t) return {};
 
@@ -241,6 +315,15 @@ function extractWideLengthMmFromText(raw: string): { wideMm?: number; lengthMm?:
   if (pair) {
     const w = Number(pair[1]);
     const l = Number(pair[2]);
+    if (Number.isFinite(w) && w > 0 && Number.isFinite(l) && l > 0) {
+      return { wideMm: clampMm(w), lengthMm: clampMm(l) };
+    }
+  }
+  // 念のため: "300X300" なども拾う（大文字X）
+  const pair2 = t.match(/(\d{2,5})\s*[Xｘ]\s*(\d{2,5})/);
+  if (pair2) {
+    const w = Number(pair2[1]);
+    const l = Number(pair2[2]);
     if (Number.isFinite(w) && w > 0 && Number.isFinite(l) && l > 0) {
       return { wideMm: clampMm(w), lengthMm: clampMm(l) };
     }
@@ -286,8 +369,9 @@ function applyHardFallbackFromText(row: {
   }
 
   const wl = extractWideLengthMmFromText(raw);
-  if (row.wideMm == null && wl.wideMm != null) row.wideMm = wl.wideMm;
-  if (row.lengthMm == null && wl.lengthMm != null) row.lengthMm = wl.lengthMm;
+  // AIが片側だけ返すケースがあるため、欠けている方だけでも必ず埋める
+  if (wl.wideMm != null && row.wideMm == null) row.wideMm = wl.wideMm;
+  if (wl.lengthMm != null && row.lengthMm == null) row.lengthMm = wl.lengthMm;
 }
 
 function clampMm(n: number): number {
@@ -388,7 +472,11 @@ function suggestedInputForUnitM(size: SizeResult): number | null {
 // W-100 のように「幅だけ」書かれている場合、AIが lengthMm まで同値で埋めてしまうことがある。
 // その場合は lengthMm を捨てる（300×300 等のペア指定や L/長さ 指定がある時だけ lengthMm を採用）
 function hasPairDimensionText(t: string): boolean {
-  return /(\d{2,4})\s*[×x＊*]\s*(\d{2,4})/.test(t);
+  const s = normalizeText(t);
+  return (
+    /(\d{2,4})\s*[×x＊*]\s*(\d{2,4})/.test(s) ||
+    /(\d{2,4})\s*[Xｘ]\s*(\d{2,4})/.test(s)
+  );
 }
 
 function hasExplicitLengthText(t: string): boolean {
@@ -458,7 +546,11 @@ function sanitizeSuspiciousMmFromQty(
   if (out.heightMm != null) {
     if (out.heightMm > MAX_H_MM) {
       out.heightMm = undefined;
-    } else if (!hasH && Number.isFinite(qtyMm) && Math.abs(out.heightMm - qtyMm) <= tol) {
+    } else if (
+      !hasH &&
+      Number.isFinite(qtyMm) &&
+      Math.abs(out.heightMm - qtyMm) <= tol
+    ) {
       // raw に H/高さ/立上り/糸尺 の根拠が無いのに qty*1000 に近い → 誤爆
       out.heightMm = undefined;
     }
@@ -475,7 +567,10 @@ function sanitizeSuspiciousMmFromQty(
   if (out.lengthMm != null) {
     if (out.lengthMm > 50000) {
       out.lengthMm = undefined;
-    } else if (Number.isFinite(qtyMm) && Math.abs(out.lengthMm - qtyMm) <= tol) {
+    } else if (
+      Number.isFinite(qtyMm) &&
+      Math.abs(out.lengthMm - qtyMm) <= tol
+    ) {
       out.lengthMm = undefined;
     }
   }
@@ -790,7 +885,9 @@ export async function POST(req: Request) {
     let sizeTextCol: number | null =
       typeof detected.sizeText === "number" ? detected.sizeText : null;
     if (useManualCols && (sizeTextCol == null || sizeTextCol < 0)) {
-      throw new Error("sizeCol（サイズ列）が未指定です。列指定ON時は必須です。");
+      throw new Error(
+        "sizeCol（サイズ列）が未指定です。列指定ON時は必須です。",
+      );
     }
     // ★ auto検出で qty と同じ列なら無効化するが、manual指定は絶対に殺さない
     if (!useManualCols && sizeTextCol != null && sizeTextCol === qtyCol) {
@@ -834,7 +931,8 @@ export async function POST(req: Request) {
       if (sizeTextCol != null && sizeTextCol === qtyCol) {
         const res: ExcelSumError = {
           ok: false,
-          error: "sizeCol（サイズ列）が数量列(qtyCol)と同じです。列指定を確認してください。",
+          error:
+            "sizeCol（サイズ列）が数量列(qtyCol)と同じです。列指定を確認してください。",
         };
         return NextResponse.json(res, { status: 400 });
       }
@@ -880,6 +978,7 @@ export async function POST(req: Request) {
 
       sizeText?: string;
       sizeFromAi?: boolean;
+      autoSizeEnabled?: boolean;
 
       _unitNormalized: string;
       _qty: number;
@@ -907,16 +1006,40 @@ export async function POST(req: Request) {
 
       const unitRaw = toStr(r[unitCol]);
       const unit = normalizeUnit(unitRaw);
+      const isUnitM = unit === "m";
 
       sumsByUnit[unit] = (sumsByUnit[unit] ?? 0) + qty;
 
       const itemTextAll = normalizeText(toStr(r[itemCol]));
       const descTextAll = normalizeText(toStr(r[descCol]));
-      const sizeTextColRaw =
-        sizeTextCol >= 0 ? normalizeText(toStr(r[sizeTextCol])) : "";
 
-      // ✅ AIに渡すテキスト：品名 + 摘要 + サイズ列
-      const sizeTextJoined = normalizeText(sizeTextColRaw);
+      const sizeTextColRaw =
+        sizeTextCol != null && sizeTextCol >= 0
+          ? normalizeText(toStr(r[sizeTextCol]))
+          : "";
+
+      // =========================================================
+      // ✅ サイズは「m の行だけ」扱う
+      //    - m以外はサイズ自動抽出しない
+      //    - m以外は表示用 sizeText も出さない（UI上で誤解が起きるため）
+      // =========================================================
+      const sizeTextForDisplay = isUnitM ? sizeTextColRaw : "";
+
+      let sizeTextJoined = "";
+      if (isUnitM) {
+        // m の時だけ「抽出対象テキスト」を採用
+        sizeTextJoined = sizeTextColRaw;
+
+        // 1) 元セルに ✖ が含まれる／または「×だけ」なら無効扱い
+        if (isCrossOnlyMarker(sizeTextColRaw)) {
+          sizeTextJoined = "";
+        }
+
+        // 2) 「寸法ペア + 面積 + 全体/含む」系は誤計算になりやすいので除外
+        if (sizeTextJoined && shouldSkipSizeExtraction(sizeTextJoined)) {
+          sizeTextJoined = "";
+        }
+      }
 
       const rowIndex1Based = i + 1;
 
@@ -942,11 +1065,16 @@ export async function POST(req: Request) {
 
         suggestedInput: undefined,
 
-        sizeText: sizeTextJoined || undefined,
-        sizeFromAi: useAiSize ? true : false,
+        // 表示用：m 以外でもサイズ列の文字は出してよい（ただし自動抽出はしない）
+        sizeText: sizeTextForDisplay ? sizeTextForDisplay : undefined,
+        // 自動抽出は m の行だけ
+        sizeFromAi: useAiSize && isUnitM ? true : false,
+        // UI側の自動入力/自動換算も unit=m の行だけ許可する
+        autoSizeEnabled: isUnitM,
 
         _unitNormalized: unit,
         _qty: qty,
+        // 自動抽出用：m 以外は必ず ""（AI/regex の対象外）
         _rawSizeText: sizeTextJoined,
       });
 
@@ -957,8 +1085,26 @@ export async function POST(req: Request) {
         sumM2 += qty;
       }
 
-      if (useAiSize && sizeTextJoined && sizeTextCol >= 0) {
+      // =========================================================
+      // ✅ AIに渡すのも「m だけ」
+      // =========================================================
+      if (useAiSize && isUnitM && sizeTextJoined) {
         pendingAi.push({ id: idx, text: sizeTextJoined, unit, qty });
+      } else {
+        // ✅ m以外は「自動抽出」だけ無効化（表示用 sizeText は残す）
+        previewTemp[idx]._rawSizeText = "";
+
+        previewTemp[idx].heightMm = undefined;
+        previewTemp[idx].overlapMm = undefined;
+        previewTemp[idx].wideMm = undefined;
+        previewTemp[idx].lengthMm = undefined;
+        previewTemp[idx].suggestedInput = undefined;
+
+        // ※ calcM2 は unit=㎡ の時は必要なので消さない
+        if (unit !== "㎡") previewTemp[idx].calcM2 = undefined;
+
+        previewTemp[idx].sizeFromAi = false;
+        previewTemp[idx].autoSizeEnabled = false;
       }
     }
 
@@ -994,7 +1140,12 @@ export async function POST(req: Request) {
           let s1 = sanitizeAiSizeByText(base, row._rawSizeText);
 
           // 2) qty(m) がそのまま高さmmになった事故（例: qty=58.8 → heightMm=58800）を除去
-          s1 = sanitizeSuspiciousMmFromQty(row._unitNormalized, row._qty, row._rawSizeText, s1);
+          s1 = sanitizeSuspiciousMmFromQty(
+            row._unitNormalized,
+            row._qty,
+            row._rawSizeText,
+            s1,
+          );
 
           row.heightMm = s1.heightMm;
           row.wideMm = s1.wideMm;
@@ -1036,28 +1187,7 @@ export async function POST(req: Request) {
             sumM2 += calc;
           }
         } else if (row._unitNormalized === "箇所") {
-          // unit=箇所 は「使用(㎡/箇所)」が取れたら qty と掛けて㎡にする
-          if (row.suggestedInput == null) {
-            const sug = suggestedInputForArea({
-              heightMm: row.heightMm,
-              wideMm: row.wideMm,
-              lengthMm: row.lengthMm,
-              overlapMm: row.overlapMm,
-            });
-            if (sug != null) row.suggestedInput = sug;
-          }
-
-          const calc =
-            sz.calcM2 != null
-              ? sz.calcM2
-              : row.suggestedInput != null
-                ? row._qty * row.suggestedInput
-                : null;
-
-          if (calc != null && Number.isFinite(calc)) {
-            row.calcM2 = calc;
-            sumM2 += calc;
-          }
+          // ✅ 今回の方針：箇所は自動換算しない（事故防止）
         } else if (row._unitNormalized === "㎡") {
           // unit=㎡ は qty がそのまま㎡（ただし既にループ前で入れているので二重加算しない）
           // AIが calcM2 を返しても無視してOK
@@ -1087,6 +1217,7 @@ export async function POST(req: Request) {
 
       sizeText: r.sizeText,
       sizeFromAi: r.sizeFromAi,
+      autoSizeEnabled: r.autoSizeEnabled,
     }));
 
     // ★ 最終的に使用した sizeTextCol を確定させる（manual優先）
