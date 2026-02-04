@@ -285,7 +285,8 @@ function extractOverlapMmFromText(raw: string): number | undefined {
   const m = t.match(/(?:重ね代?|かさね|カサネ)\s*[:=]?\s*(\d{1,5})/);
   if (!m) return undefined;
   const n = Number(m[1]);
-  if (!Number.isFinite(n) || n < 0) return undefined;
+  // 0 は「表示・計算の根拠にならない」ため未指定扱いにする
+  if (!Number.isFinite(n) || n <= 0) return undefined;
   return clampMm(n);
 }
 
@@ -402,12 +403,12 @@ function safeExtractSize(obj: unknown): SizeResult {
   const w = pickNumMm(obj.wideMm);
   const l = pickNumMm(obj.lengthMm);
 
-  // overlapMm は 0 もあり得る（0許可）
+  // overlapMm は 0 は返さない（0は未指定扱い）
   const ovRaw = obj.overlapMm;
   let ov: number | undefined;
   if (typeof ovRaw === "number" && Number.isFinite(ovRaw)) {
     const mm = clampMm(ovRaw);
-    if (mm >= 0) ov = mm;
+    if (mm > 0) ov = mm;
   }
 
   const sug = pickFiniteNum(obj.suggestedInput);
@@ -811,16 +812,27 @@ export async function POST(req: Request) {
 
     const ws = wb.Sheets[sheetName];
 
+    // シートの開始行/開始列（!ref が A1 とは限らない）
+    const ref = (ws as XLSX.WorkSheet)["!ref"] as string | undefined;
+    const sheetRange = ref ? XLSX.utils.decode_range(ref) : null;
+    const startRow0 = sheetRange ? sheetRange.s.r : 0; // 0-based
+    const startCol0 = sheetRange ? sheetRange.s.c : 0; // 0-based
+
     const rowsRaw = XLSX.utils.sheet_to_json(ws, {
       header: 1,
       raw: true,
       defval: "",
-      blankrows: false,
+      // 空行を落とすと Excel の行番号とズレるので保持する
+      blankrows: true,
+      // !ref の開始位置から AoA が始まる前提で処理する
+      // （sheet_to_json は基本 !ref を基準に配列化される）
     }) as unknown[];
 
     function fillMergedCellsAoA(
       aoa: unknown[][],
       merges: XLSX.Range[] | undefined,
+      startRow0: number,
+      startCol0: number,
     ): unknown[][] {
       if (!merges || merges.length === 0) return aoa;
 
@@ -833,10 +845,16 @@ export async function POST(req: Request) {
       for (const m of merges) {
         const s = m.s;
         const e = m.e;
-        const r0 = s.r;
-        const c0 = s.c;
-        const r1 = e.r;
-        const c1 = e.c;
+
+        // merges はシート絶対座標。AoA は !ref の開始行/開始列からの相対。
+        const r0 = s.r - startRow0;
+        const c0 = s.c - startCol0;
+        const r1 = e.r - startRow0;
+        const c1 = e.c - startCol0;
+
+        // AoA の範囲外は無視
+        if (r1 < 0 || c1 < 0) continue;
+        if (r0 >= out.length) continue;
 
         while (out.length <= r0) out.push([]);
         const startRow = out[r0];
@@ -846,11 +864,16 @@ export async function POST(req: Request) {
         const topLeftStr = normalizeText(toStr(topLeft));
         if (!topLeftStr) continue;
 
-        for (let rr = r0; rr <= r1; rr++) {
-          while (out.length <= rr) out.push([]);
+        const rrStart = Math.max(0, r0);
+        const rrEnd = Math.min(out.length - 1, r1);
+
+        for (let rr = rrStart; rr <= rrEnd; rr++) {
           const row = out[rr];
-          ensureRowLen(row, c1 + 1);
-          for (let cc = c0; cc <= c1; cc++) {
+          const ccStart = Math.max(0, c0);
+          const ccEnd = Math.max(ccStart, c1);
+          ensureRowLen(row, ccEnd + 1);
+
+          for (let cc = ccStart; cc <= ccEnd; cc++) {
             const cur = row[cc];
             const curStr = normalizeText(toStr(cur));
             if (!curStr) row[cc] = topLeft;
@@ -864,7 +887,7 @@ export async function POST(req: Request) {
     const merges = (ws as XLSX.WorkSheet)["!merges"] as
       | XLSX.Range[]
       | undefined;
-    const rows2d = fillMergedCellsAoA(rows2dRaw, merges);
+    const rows2d = fillMergedCellsAoA(rows2dRaw, merges, startRow0, startCol0);
 
     let maxCols = 0;
     for (const r of rows2d.slice(0, 200)) {
@@ -1041,7 +1064,8 @@ export async function POST(req: Request) {
         }
       }
 
-      const rowIndex1Based = i + 1;
+      // Excel の実行行番号（1-based）。!ref の開始行 + AoA index を補正する
+      const rowIndex1Based = startRow0 + i + 1;
 
       const shouldPreview = previewAll || previewTemp.length < 30;
       if (!shouldPreview) continue;

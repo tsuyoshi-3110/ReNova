@@ -67,6 +67,11 @@ export default function Page() {
     null,
   );
 
+  // ✅ ③除外キーワード（表示から除外したい行）
+  const [excelExcludeKeyword, setExcelExcludeKeyword] = useState("");
+  // ✅ ③除外キーワード（②を押した時に反映する用）
+  const [excelExcludeKeywordApplied, setExcelExcludeKeywordApplied] = useState("");
+
   // ★ 要件：このExcel想定の初期値（1始まり）
   const [itemCol1Based, setItemCol1Based] = useState(""); // 品名
   const [descCol1Based, setDescCol1Based] = useState(""); // 摘要
@@ -93,10 +98,8 @@ export default function Page() {
   const [autoDetectLoading, setAutoDetectLoading] = useState(false);
   const [autoDetectError, setAutoDetectError] = useState<string | null>(null);
 
-  // ✅ サイズ抽出をAIに任せる（100%）
-  const [useAiSize, setUseAiSize] = useState(true);
-  // AIに渡す行数上限（多すぎると遅い/高コストになり得るため上限を設ける）
-  const [sizeAiMax, setSizeAiMax] = useState("200");
+  // ✅ Excel選択＆シート確定後に「列を自動で拾う」を1回だけ自動実行するためのフラグ
+  const [didAutoDetectCols, setDidAutoDetectCols] = useState(false);
 
   // ✅ 保存メッセージは 3 秒後に自動で消す
   useEffect(() => {
@@ -199,16 +202,14 @@ export default function Page() {
     [hideZeroAmount, amountCol1Based],
   );
 
-  const appendAiSizeFlags = useCallback(
-    (fd: FormData) => {
-      fd.append("useAiSize", useAiSize ? "1" : "0");
-      // 空/不正はデフォルト200に寄せる（API側でも最終ガードする想定）
-      const n = Number(sizeAiMax);
-      const max = Number.isFinite(n) && n > 0 ? Math.floor(n) : 200;
-      fd.append("sizeAiMax", String(max));
-    },
-    [useAiSize, sizeAiMax],
-  );
+  const appendAiSizeFlags = useCallback((fd: FormData) => {
+    // ✅ サイズ抽出は常にAI（UIで切り替えない）
+    fd.append("useAiSize", "1");
+
+    // ✅ 上限も固定で十分大きく（実運用は100行程度想定だが、保険で大きめ）
+    //    API側でも最終ガードがある想定。
+    fd.append("sizeAiMax", "2000");
+  }, []);
 
   const fetchExcelCodes = useCallback(
     async (f: File) => {
@@ -363,6 +364,16 @@ export default function Page() {
     }
   }, [excelFile, excelSheetName]);
 
+  // ✅ Excelファイル選択 + シート確定後に「列を自動で拾う」を自動実行（1回だけ）
+  useEffect(() => {
+    if (!excelFile) return;
+    if (!excelSheetName) return;
+    if (didAutoDetectCols) return;
+
+    setDidAutoDetectCols(true);
+    autoDetectCols();
+  }, [excelFile, excelSheetName, didAutoDetectCols, autoDetectCols]);
+
   const importExcel = useCallback(async () => {
     setExcelError(null);
     setExcelCodesError(null);
@@ -383,6 +394,8 @@ export default function Page() {
     setExcelResult(null);
     setExcelKeyword2("");
     setExcelKeyword2Error(null);
+    setExcelExcludeKeyword("");
+    setExcelExcludeKeywordApplied("");
 
     // ✅ 入力もリセット（別ファイルのrowIndexと混ざるの防止）
     setCalcMmByRow({});
@@ -394,6 +407,8 @@ export default function Page() {
     setExcelKeyword2Error(null);
     setExcelResult(null);
     setExcelKeyword2("");
+    setExcelExcludeKeyword("");
+    setExcelExcludeKeywordApplied("");
 
     if (!excelFile) {
       setExcelError("Excelファイルを選択してください");
@@ -480,62 +495,51 @@ export default function Page() {
     appendAiSizeFlags,
   ]);
 
+  // --- Search helpers (keyword2 / exclude keyword) ---
+  function normalizeForSearch(input: string): string {
+    const nfkc = input.normalize("NFKC");
+    return nfkc
+      .replace(/\s+/g, "")
+      .replace(/[－―ー−]/g, "-")
+      .replace(/＝/g, "=")
+      .toLowerCase();
+  }
+
+  function isJapaneseToken(s: string): boolean {
+    return /[\u3040-\u30FF\u4E00-\u9FFF々]/.test(s);
+  }
+
+  // スペース区切り → OR 用トークン（短すぎ英数字は除外）
+  function splitKeywords(raw: string): string[] {
+    const parts = raw
+      .trim()
+      .split(/\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const tokens = parts
+      .map((p) => normalizeForSearch(p))
+      .filter((t) => {
+        if (!t) return false;
+        if (isJapaneseToken(t)) return true;
+        return t.length >= 2;
+      });
+
+    return Array.from(new Set(tokens));
+  }
+
+  function rowTextForMatch(r: ExcelSumPreviewRow): string {
+    return normalizeForSearch(`${r.item ?? ""} ${r.desc ?? ""} ${r.unit ?? ""}`);
+  }
+
+  function includesAnyToken(textNorm: string, tokens: string[]): boolean {
+    if (tokens.length === 0) return true;
+    return tokens.some((t) => textNorm.includes(t));
+  }
+
   // ✅ ②（キーワード2でさらに絞り込み）
   const runExcelSum2 = useCallback(async () => {
     setExcelKeyword2Error(null);
-
-    // 検索用の正規化（全角/半角揺れ・空白・ハイフン・= を揃える）
-    function normalizeForSearch(input: string): string {
-      // ✅ NFKC で半角カナ→全角カナ、全角英数→半角、濁点結合などを正規化
-      // 例: "ｹﾚﾝ" と "ケレン" を同一扱いにする
-      const nfkc = input.normalize("NFKC");
-
-      return nfkc
-        .replace(/\s+/g, "")
-        .replace(/[－―ー−]/g, "-")
-        .replace(/＝/g, "=")
-        .toLowerCase();
-    }
-
-    function isJapaneseToken(s: string): boolean {
-      // ひらがな/カタカナ/漢字/々
-      return /[\u3040-\u30FF\u4E00-\u9FFF々]/.test(s);
-    }
-
-    // キーワード2：スペース区切りで OR 検索
-    // 誤爆を避けるため、英数字1文字みたいな短すぎトークンは無視する
-    function splitKeywords(raw: string): string[] {
-      const parts = raw
-        .trim()
-        .split(/\s+/)
-        .map((s) => s.trim())
-        .filter(Boolean);
-
-      const tokens = parts
-        .map((p) => normalizeForSearch(p))
-        .filter((t) => {
-          if (!t) return false;
-          // 日本語を含むなら 1文字でもOK（例: 溝）
-          if (isJapaneseToken(t)) return true;
-          // 英数字のみは 2文字以上（例: H だけ、L だけ、などは誤爆しやすいので除外）
-          return t.length >= 2;
-        });
-
-      // 重複除去
-      return Array.from(new Set(tokens));
-    }
-
-    function rowTextForMatch(r: ExcelSumPreviewRow): string {
-      // OR判定対象：品名＋摘要＋単位（単位での絞り込みも効くように）
-      return normalizeForSearch(
-        `${r.item ?? ""} ${r.desc ?? ""} ${r.unit ?? ""}`,
-      );
-    }
-
-    function includesAnyToken(textNorm: string, tokens: string[]): boolean {
-      if (tokens.length === 0) return true;
-      return tokens.some((t) => textNorm.includes(t));
-    }
 
     if (!excelFile) {
       setExcelKeyword2Error("Excelファイルを選択してください");
@@ -570,6 +574,9 @@ export default function Page() {
       setExcelKeyword2Error("キーワード2を入力してください");
       return;
     }
+
+    // ✅ 除外キーワードは「②を押した時点の入力」を反映（入力中のライブ反映はしない）
+    setExcelExcludeKeywordApplied(excelExcludeKeyword.trim());
 
     setExcelKeyword2Loading(true);
     try {
@@ -656,6 +663,7 @@ export default function Page() {
     excelFile,
     excelSheetName,
     excelKeyword2,
+    excelExcludeKeyword,
     excelResult,
     validateManualCols,
     appendManualCols,
@@ -663,7 +671,27 @@ export default function Page() {
     appendAiSizeFlags,
   ]);
 
-  const sumsByUnit = excelResult?.sumsByUnit ?? {};
+  // ✅ 除外キーワード（ORで除外）を適用したプレビュー
+  const filteredPreview = useMemo(() => {
+    if (!excelResult) return [] as ExcelSumPreviewRow[];
+
+    const ex = excelExcludeKeywordApplied.trim();
+    if (!ex) return excelResult.preview;
+
+    const exTokens = splitKeywords(ex);
+    if (exTokens.length === 0) return excelResult.preview;
+
+    return excelResult.preview.filter((r) => {
+      const text = rowTextForMatch(r);
+      // OR: どれか1つでも含むなら除外
+      return !includesAnyToken(text, exTokens);
+    });
+  }, [excelResult, excelExcludeKeywordApplied]);
+
+  // ✅ 単位別合計（表示用：除外後）
+  const sumsByUnit = useMemo(() => {
+    return recomputeSumsByUnit(filteredPreview);
+  }, [filteredPreview]);
 
   // ✅ 既に㎡の行（単位=㎡）の㎡値（最優先：qty、それが無ければcalcM2）
   const getM2Already = useCallback((r: ExcelSumPreviewRow): number | null => {
@@ -869,12 +897,12 @@ export default function Page() {
   const sumM2Client = useMemo(() => {
     if (!excelResult) return 0;
     let sum = 0;
-    for (const r of excelResult.preview) {
+    for (const r of filteredPreview) {
       const v = calcM2FromInputOrExisting(r);
       if (typeof v === "number") sum += v;
     }
     return sum;
-  }, [excelResult, calcM2FromInputOrExisting]);
+  }, [excelResult, filteredPreview, calcM2FromInputOrExisting]);
 
   const saveCurrentResult = useCallback(() => {
     setSaveMsg(null);
@@ -976,6 +1004,7 @@ export default function Page() {
                   setExcelKeyword2Error(null);
 
                   setCalcMmByRow({});
+                  setDidAutoDetectCols(false);
                 }}
                 className="w-full rounded border px-3 py-2 text-sm bg-white dark:bg-gray-950 dark:border-gray-800"
               >
@@ -999,7 +1028,11 @@ export default function Page() {
           <>
             <div className="rounded border p-3 dark:border-gray-800 space-y-2">
               <div className="text-sm font-extrabold">
-                列指定（必須 / 1始まり）
+                列指定
+              </div>
+              <div className="mt-1 text-[11px] leading-relaxed opacity-80">
+                エクセルシート内で「名称・摘要・数量・単位・サイズ」が書かれている表（枠）の、先頭列の番号を指定してください。
+                AIの自動抽出は間違うことがあるため、合わない場合は手動で調整してください。
               </div>
               <div className="flex items-center gap-2 mt-2">
                 <button
@@ -1023,38 +1056,6 @@ export default function Page() {
                 B=2, C=3...）の位置で数えて入力してください
               </div>
 
-              <div className="mt-3 rounded border p-3 dark:border-gray-800">
-                <div className="text-sm font-extrabold">サイズ抽出（AI）</div>
-                <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setUseAiSize((v) => !v)}
-                    className={
-                      "w-28 rounded border px-3 py-2 text-xs font-extrabold " +
-                      (useAiSize
-                        ? "bg-black text-white border-black"
-                        : "bg-white dark:bg-gray-950 dark:border-gray-800")
-                    }
-                  >
-                    {useAiSize ? "ON" : "OFF"}
-                  </button>
-
-                  <div className="flex items-center gap-2">
-                    <div className="text-xs font-bold">AI上限行数</div>
-                    <input
-                      value={sizeAiMax}
-                      onChange={(e) => setSizeAiMax(e.target.value)}
-                      className="w-24 rounded border px-2 py-1 text-xs bg-white dark:bg-gray-950 dark:border-gray-800"
-                      placeholder="200"
-                      inputMode="numeric"
-                    />
-                    <div className="text-[11px] opacity-70">
-                      ※
-                      サイズ列の抽出を100%AIに任せます（多すぎると遅くなるため上限あり）
-                    </div>
-                  </div>
-                </div>
-              </div>
 
               <div className="overflow-x-auto">
                 <div className="flex items-end gap-3 min-w-max text-sm">
@@ -1190,13 +1191,12 @@ export default function Page() {
                 setAmountCol1Based("");
                 setAmountColError(null);
 
-                setUseAiSize(true);
-                setSizeAiMax("200");
-
                 // ✅ シート選択もリセットして取り直す
                 setExcelSheetNames([]);
                 setExcelSheetName("");
                 setExcelSheetError(null);
+
+                setDidAutoDetectCols(false);
 
                 if (f) {
                   (async () => {
@@ -1309,7 +1309,20 @@ export default function Page() {
                       </div>
                     ) : null}
                   </div>
-
+                </div>
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+                  <div className="flex-1">
+                    <div className="mt-2 text-xs font-extrabold">除外キーワード（ORで除外）</div>
+                    <input
+                      value={excelExcludeKeyword}
+                      onChange={(e) => setExcelExcludeKeyword(e.target.value)}
+                      className="w-full rounded border px-3 py-2 text-sm bg-white dark:bg-gray-950 dark:border-gray-800"
+                      placeholder="例：端末 シーリング 共通 No.8に含む"
+                    />
+                    <div className="mt-1 text-[11px] opacity-80">
+                      ※ スペース区切りで入力。②「さらに絞る」を押した時点の入力で、1つでも含む行を表示から除外します（OR）。
+                    </div>
+                  </div>
                   <button
                     onClick={runExcelSum2}
                     disabled={
@@ -1349,7 +1362,7 @@ export default function Page() {
             <div className="text-sm">
               ヒット行数：
               <span className="ml-2 font-extrabold">
-                {excelResult.matchedCount}
+                {filteredPreview.length}
               </span>
             </div>
 
@@ -1400,7 +1413,7 @@ export default function Page() {
             </div>
 
             <div className="rounded border p-3 dark:border-gray-800">
-              <div className="text-xs font-bold mb-2">プレビュー（全件）</div>
+              <div className="text-xs font-bold mb-2">プレビュー（除外適用後）</div>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
@@ -1416,7 +1429,7 @@ export default function Page() {
                     </tr>
                   </thead>
                   <tbody>
-                    {excelResult.preview.map((r) => {
+                    {filteredPreview.map((r) => {
                       const rawUnit = (r.unit ?? "").normalize("NFKC");
                       const unitNorm = normalizeUnit(rawUnit);
 
