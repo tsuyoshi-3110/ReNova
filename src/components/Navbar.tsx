@@ -39,7 +39,7 @@ export default function Navbar() {
   const menuLinks = useMemo(
     () => [
       { href: "/project-management", label: "工程表" },
-      { href: "/proclink", label: "写真管理" },
+      { href: "/proclink", label: "現場管理" },
       { href: "/sum-quantity", label: "材料積算" },
       { href: "/board-settings", label: "掲示板" },
     ],

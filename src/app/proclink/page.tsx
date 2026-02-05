@@ -52,7 +52,7 @@ export default function AdminMenuPage() {
     <main className="min-h-dvh bg-gray-50 dark:bg-gray-950">
       <div className="mx-auto w-full max-w-3xl px-4 py-8">
         <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-          写真管理メニュー
+          現場管理メニュー
         </h1>
         <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
           ReNova / Proclink 管理機能の入口です
