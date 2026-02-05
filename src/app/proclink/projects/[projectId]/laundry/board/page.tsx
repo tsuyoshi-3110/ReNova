@@ -1,6 +1,13 @@
+// src/app/proclink/projects/[projectId]/laundry/board/page.tsx
 import LaundryResidentClient from "../LaundryResidentClient";
 
-export default function LaundryBoardPage({ params }: { params: { projectId: string } }) {
+type Params = { projectId: string };
+
+export default async function LaundryBoardPage(props: {
+  params: Promise<Params>;
+}) {
+  const params = await props.params;
+
   return (
     <main className="mx-auto max-w-5xl p-4 sm:p-6">
       <div className="mb-4">
