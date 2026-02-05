@@ -640,12 +640,13 @@ function exportExcelMany(recs: CombinedRow[], workName: string) {
           !!r && typeof r === "object",
       )
       .forEach((r) => {
-        const specText = getSpecTextByRow(spec, r); // ✅ ここがポイント
+        const noteText = getNoteTextByRow(spec, r);
+        const specLabel = getSpecLabelByRow(spec, r);
         const usage = usageTextForRow(spec, r);
         const req = aggTotalLabel(x.category, r);
         const unit = aggUnitLabel(r);
 
-        pushRow([r.name, "", specText, usage, req, unit]);
+        pushRow([r.name, noteText, specLabel, usage, req, unit]);
         rowNo++;
       });
 
