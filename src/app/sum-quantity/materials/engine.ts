@@ -1,5 +1,3 @@
-// /src/app/sum-quantity/materials/engine.ts
-
 export type AreaKey = string;
 
 export type AreaField<K extends AreaKey = AreaKey> = {
@@ -14,8 +12,8 @@ export type LiquidKgMaterial<K extends AreaKey = AreaKey> = {
   areaKey: K;
   kgPerM2: number;
   packKg?: number;
+  packKgOptions?: number[];
   unitLabel?: string;
-  // 表示用（任意）
   specText?: string;
 };
 
@@ -23,14 +21,10 @@ export type SheetRollMaterial<K extends AreaKey = AreaKey> = {
   kind: "sheetRoll";
   name: string;
   areaKey: K;
-
-  // 計算用（必須）
   sheetWidthM: number;
   sheetLengthM: number;
-
+  sheetLengthMOptions?: number[];
   rollLabel?: string;
-
-  // 表示用（任意）
   specText?: string;
 };
 
@@ -42,11 +36,14 @@ export type JointTapeRollMaterial<K extends AreaKey = AreaKey> = {
   // 計算用（必須）
   sheetWidthM: number;
   tapeLengthM: number;
-
+  tapeLengthMOptions?: number[];
   rollLabel?: string;
 
   // ロス率（任意）
   wasteRate?: number;
+
+  // ✅ 特殊：面積換算（例：スリットテープ 1巻=200㎡など）
+  coverM2PerRoll?: number;
 
   // 表示用（任意）
   // 例：100(=100mm幅) を入れると「50m×100mm」表示できる
@@ -56,10 +53,30 @@ export type JointTapeRollMaterial<K extends AreaKey = AreaKey> = {
   specText?: string;
 };
 
+// ✅ 外周（端末処理）テープ：面積ではなく「外周(m)」を入力して計算する
+export type EndTapeMaterial<K extends AreaKey = AreaKey> = {
+  kind: "endTape";
+  name: string;
+  areaKey: K;
+
+  // 1巻あたりの長さ（m）
+  tapeLengthM: number;
+  tapeLengthMOptions?: number[];
+  rollLabel?: string;
+
+  // ロス率（任意）
+  wasteRate?: number;
+
+  // 表示用（任意）
+  tapeWidthMm?: number;
+  specText?: string;
+};
+
 export type MaterialDef<K extends AreaKey = AreaKey> =
   | LiquidKgMaterial<K>
   | SheetRollMaterial<K>
-  | JointTapeRollMaterial<K>;
+  | JointTapeRollMaterial<K>
+  | EndTapeMaterial<K>;
 
 export type SpecDef<K extends AreaKey = AreaKey> = {
   id: string;
@@ -97,13 +114,32 @@ export type JointTapeRollRow<K extends AreaKey = AreaKey> = {
   jointLenM: number;
   tapeLengthM: number;
   sheetWidthM: number;
+
   wasteRate: number;
+
+  // ✅ 表示/デバッグ用（任意）：面積換算の基準
+  coverM2PerRoll?: number;
+};
+
+export type EndTapeRow<K extends AreaKey = AreaKey> = {
+  kind: "endTape";
+  name: string;
+  areaKey: K;
+  rolls: number;
+  rollLabel: string;
+  perimeterM: number;
+  tapeLengthM: number;
+  wasteRate: number;
+
+  // 表示/デバッグ用（任意）
+  tapeWidthMm?: number;
 };
 
 export type CalcRow<K extends AreaKey = AreaKey> =
   | LiquidKgRow<K>
   | SheetRollRow<K>
-  | JointTapeRollRow<K>;
+  | JointTapeRollRow<K>
+  | EndTapeRow<K>;
 
 function toFiniteNumber(v: unknown): number {
   if (typeof v !== "number") return 0;
@@ -118,9 +154,10 @@ function round1(n: number): number {
  * ✅ 共通の計算式
  * - liquidKg: requiredKg = area * kgPerM2
  * - sheetRoll: rolls = area / (sheetWidthM * sheetLengthM)
+ * - endTape: rolls = perimeter(m) * (1 + wasteRate) / tapeLengthM
  * - jointTapeRoll:
- *    jointLenM = (area / sheetWidthM) * (1 + wasteRate)
- *    rolls = jointLenM / tapeLengthM
+ *    - 通常：jointLenM = (area / sheetWidthM) * (1 + wasteRate), rolls = jointLenM / tapeLengthM
+ *    - 特殊（coverM2PerRoll 指定時）：rolls = area * (1 + wasteRate) / coverM2PerRoll（jointLenM は 0 扱い）
  */
 export function calcSpec<K extends AreaKey>(
   spec: SpecDef<K>,
@@ -161,12 +198,55 @@ export function calcSpec<K extends AreaKey>(
       continue;
     }
 
+    if (m.kind === "endTape") {
+      const wasteRate = typeof m.wasteRate === "number" ? m.wasteRate : 0;
+      const perimeterM = area; // areaKey で受け取った値は外周(m)として扱う
+      const tapeLengthM = m.tapeLengthM;
+
+      const rolls =
+        tapeLengthM > 0 ? (perimeterM * (1 + wasteRate)) / tapeLengthM : 0;
+
+      rows.push({
+        kind: "endTape",
+        name: m.name,
+        areaKey: m.areaKey,
+        rolls,
+        rollLabel: m.rollLabel ?? "巻",
+        perimeterM: round1(perimeterM),
+        tapeLengthM,
+        wasteRate,
+        tapeWidthMm: m.tapeWidthMm,
+      });
+      continue;
+    }
+
     // jointTapeRoll
     const w = m.sheetWidthM;
     const wasteRate = typeof m.wasteRate === "number" ? m.wasteRate : 0;
-
-    const jointLenM = w > 0 ? (area / w) * (1 + wasteRate) : 0;
     const tapeLengthM = m.tapeLengthM;
+
+    // ✅ 特殊：面積換算（例：スリットテープ 1巻=200㎡）
+    if (typeof m.coverM2PerRoll === "number" && m.coverM2PerRoll > 0) {
+      const areaWithWaste = area * (1 + wasteRate);
+      const rolls = areaWithWaste / m.coverM2PerRoll;
+
+      rows.push({
+        kind: "jointTapeRoll",
+        name: m.name,
+        areaKey: m.areaKey,
+        rolls,
+        rollLabel: m.rollLabel ?? "巻",
+        jointLenM: 0,
+        tapeLengthM,
+        sheetWidthM: w,
+        wasteRate,
+        coverM2PerRoll: m.coverM2PerRoll,
+      });
+      continue;
+    }
+
+    // 通常：ジョイント長ベース
+    const jointLenM = w > 0 ? (area / w) * (1 + wasteRate) : 0;
     const rolls = tapeLengthM > 0 ? jointLenM / tapeLengthM : 0;
 
     rows.push({

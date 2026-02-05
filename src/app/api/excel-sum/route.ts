@@ -579,15 +579,6 @@ function sanitizeSuspiciousMmFromQty(
   return out;
 }
 
-// unit=箇所 / その他 → 「使用(㎡/単位)」を決める（wide×lengthが取れたら面積）
-function suggestedInputForArea(size: SizeResult): number | null {
-  if (size.wideMm != null && size.lengthMm != null) {
-    const m2 = (size.wideMm / 1000) * (size.lengthMm / 1000);
-    return Number.isFinite(m2) && m2 > 0 ? m2 : null;
-  }
-  return null;
-}
-
 // unit=段 などの特殊補正（最小差分）
 function normalizeForIncludes(s: string): string {
   return normalizeText(s).replace(/\s+/g, "");
@@ -614,13 +605,6 @@ function applyUnitSpecificMultiplier(
 
   const v = suggested * 2;
   return Number.isFinite(v) && v > 0 ? v : suggested;
-}
-
-function calcM2ForUnitM(qtyM: number, size: SizeResult): number | null {
-  const m = suggestedInputForUnitM(size);
-  if (m == null) return null;
-  const m2 = qtyM * m;
-  return Number.isFinite(m2) ? m2 : null;
 }
 
 async function aiExtractSizesBatch(

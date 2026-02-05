@@ -10,11 +10,6 @@ export const runtime = "nodejs";
  * - hintUnit: "m" など（任意）
  * - context: item/desc 等まとめ（任意）
  */
-type ReqBody = {
-  text: string;
-  hintUnit?: string;
-  context?: string;
-};
 
 type SizeResult = {
   heightMm?: number;
@@ -86,7 +81,8 @@ function safeExtractSize(obj: unknown): SizeResult {
   const overlapMm = pickNum(obj.overlapMm);
 
   const reasonRaw = obj.reason;
-  const reason = typeof reasonRaw === "string" ? reasonRaw.slice(0, 120) : undefined;
+  const reason =
+    typeof reasonRaw === "string" ? reasonRaw.slice(0, 120) : undefined;
 
   const out: SizeResult = {};
   if (heightMm != null && heightMm > 0) out.heightMm = heightMm;

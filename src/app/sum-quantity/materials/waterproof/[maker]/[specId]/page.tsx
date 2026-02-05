@@ -1,11 +1,14 @@
-// app/materials/waterproof/tajima/[specId]/page.tsx
+// app/sum-quantity/materials/waterproof/[maker]/[specId]/page.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 
 import { calcSpec, type AreaKey } from "@/app/sum-quantity/materials/engine";
-import { getTajimaSpec } from "@/app/sum-quantity/materials/specs/tajimaSpecs";
+import {
+  getWaterproofSpec,
+  type WaterproofMaker,
+} from "@/app/sum-quantity/materials/specs/waterproof";
 
 type AggRow =
   | {
@@ -16,6 +19,7 @@ type AggRow =
       totalKg: number;
       qty: number | null;
       unitLabel: string | null;
+      packKgUsed: number | null;
     }
   | {
       kind: "sheetRoll";
@@ -34,9 +38,19 @@ type AggRow =
       rollLabel: string;
       jointLenM: number;
       tapeLengthM: number;
+    }
+  | {
+      kind: "endTape";
+      name: string;
+      flatQty: number;
+      upstandQty: number;
+      totalQty: number;
+      rollLabel: string;
+      tapeLengthM: number;
+      perimeterM: number;
     };
 
-const STORAGE_KEY = "renova:tajimaCalc:saved:v1";
+const STORAGE_KEY = "renova:waterproofCalc:saved:v1";
 
 const EXCEL_SUMS_KEY = "renova_saved_excel_sums_v1";
 
@@ -53,7 +67,7 @@ type SavedCalc = {
   savedAt: string; // ISO
   specId: string;
   displayName: string;
-  areas: { flat: number; upstand: number };
+  areas: { flat: number; upstand: number; perimeter: number };
   aggregated: AggRow[];
 };
 
@@ -81,23 +95,28 @@ function fmtDateTimeJp(iso: string) {
   return `${y}/${m}/${day} ${hh}:${mm}`;
 }
 
-export default function TajimaSpecCalcPage() {
-  const p = useParams<{ specId?: string | string[] }>();
+export default function WaterproofSpecCalcPage() {
+  const p = useParams<{
+    maker?: string | string[];
+    specId?: string | string[];
+  }>();
+
+  const makerRaw = Array.isArray(p?.maker) ? p?.maker?.[0] : (p?.maker ?? "");
   const specIdRaw = Array.isArray(p?.specId)
     ? p?.specId?.[0]
     : (p?.specId ?? "");
+
+  const maker = decodeURIComponent(makerRaw) as WaterproofMaker;
   const specId = decodeURIComponent(specIdRaw);
 
-  const spec = getTajimaSpec(specId);
+  const spec = getWaterproofSpec(maker, specId);
 
   // 入力（flat/upstandだけ使う。engineのAreaKeyが他を含んでてもエラーにならないように保持）
   const [areas, setAreas] = useState<Record<AreaKey, string>>(() => {
-    // AreaKey の union に何が入っていても、少なくとも flat/upstand は使う前提
-    // それ以外は「存在しなくても実害がない」ので、ここでは flat/upstand を確実に持たせる
-    // ※型は Record<AreaKey,string> だが、実運用は spec.areaFields にあるキーだけ参照する
     return {
       flat: "",
       upstand: "",
+      perimeter: "",
     } as Record<AreaKey, string>;
   });
 
@@ -115,20 +134,25 @@ export default function TajimaSpecCalcPage() {
     Record<string, string>
   >({});
 
+  // ✅ ユーザーが選んだ内容量(kg)で packKg を上書きする（kind::元name で管理）
+  const [packKgOverrides, setPackKgOverrides] = useState<
+    Record<string, number>
+  >({});
+
   const areaNumbers = useMemo(() => {
     const toNum = (s: string) => {
       const n = Number(s);
       return Number.isFinite(n) ? n : 0;
     };
 
-    // spec.areaFields の key だけ参照するので、ここは flat/upstand を確実に作る
     const flat = toNum(areas.flat ?? "");
     const upstand = toNum(areas.upstand ?? "");
+    const perimeter = toNum(areas.perimeter ?? "");
 
-    // calcSpec が Record<AreaKey,number> を要求する想定に合わせる
     return {
       flat,
       upstand,
+      perimeter,
     } as Record<AreaKey, number>;
   }, [areas]);
 
@@ -149,19 +173,32 @@ export default function TajimaSpecCalcPage() {
 
   // 仕様のメタ（缶重量など）
   const metas = useMemo(() => {
-    const liquid = new Map<string, { packKg?: number; unitLabel?: string }>();
+    const liquid = new Map<
+      string,
+      { packKg?: number; unitLabel?: string; packKgOptions?: number[] }
+    >();
     const sheet = new Map<string, { rollLabel?: string }>();
     const tape = new Map<
       string,
       { rollLabel?: string; tapeLengthM?: number }
     >();
+    const endTape = new Map<
+      string,
+      { rollLabel?: string; tapeLengthM?: number }
+    >();
 
-    if (!spec) return { liquid, sheet, tape };
+    if (!spec) return { liquid, sheet, tape, endTape };
 
     for (const m of spec.materials) {
       if (m.kind === "liquidKg") {
         if (!liquid.has(m.name))
-          liquid.set(m.name, { packKg: m.packKg, unitLabel: m.unitLabel });
+          liquid.set(m.name, {
+            packKg: m.packKg,
+            unitLabel: m.unitLabel,
+            // ✅ 仕様側に候補配列が実装されたらここで拾えるようにしておく
+            packKgOptions: (m as unknown as { packKgOptions?: number[] })
+              .packKgOptions,
+          });
       } else if (m.kind === "sheetRoll") {
         if (!sheet.has(m.name)) sheet.set(m.name, { rollLabel: m.rollLabel });
       } else if (m.kind === "jointTapeRoll") {
@@ -170,9 +207,16 @@ export default function TajimaSpecCalcPage() {
             rollLabel: m.rollLabel,
             tapeLengthM: m.tapeLengthM,
           });
+      } else if (m.kind === "endTape") {
+        if (!endTape.has(m.name)) {
+          endTape.set(m.name, {
+            rollLabel: m.rollLabel,
+            tapeLengthM: m.tapeLengthM,
+          });
+        }
       }
     }
-    return { liquid, sheet, tape };
+    return { liquid, sheet, tape, endTape };
   }, [spec]);
 
   // 集計（工程順・同一商品合計）
@@ -198,8 +242,26 @@ export default function TajimaSpecCalcPage() {
         const upAdd = r.areaKey === "upstand" ? add : 0;
 
         const meta = metas.liquid.get(r.name);
-        const packKg = meta?.packKg && meta.packKg > 0 ? meta.packKg : null;
         const unitLabel = meta?.unitLabel ?? null;
+
+        const packKgBase = meta?.packKg && meta.packKg > 0 ? meta.packKg : null;
+        const stableKey = `${r.kind}::${r.name}`;
+        const packKgSelected = packKgOverrides[stableKey];
+
+        const hasPackKgOptions =
+          Array.isArray(meta?.packKgOptions) && meta.packKgOptions.length > 0;
+
+        // ✅ 優先順：ユーザー選択(候補がある時のみ) > 仕様の packKg > null
+        const packKg =
+          hasPackKgOptions &&
+          typeof packKgSelected === "number" &&
+          Number.isFinite(packKgSelected) &&
+          packKgSelected > 0
+            ? packKgSelected
+            : packKgBase;
+
+        // packKg を決めたあと
+        const packKgUsed = packKg ?? null;
 
         if (!prev) {
           const totalKg = round1(add);
@@ -213,6 +275,7 @@ export default function TajimaSpecCalcPage() {
             totalKg,
             qty,
             unitLabel,
+            packKgUsed, // ✅ 追加
           });
         } else if (prev.kind === "liquidKg") {
           const flatKg = round1(prev.flatKg + flatAdd);
@@ -220,7 +283,15 @@ export default function TajimaSpecCalcPage() {
           const totalKg = round1(prev.totalKg + add);
           const qty = packKg ? Math.ceil(totalKg / packKg) : null;
 
-          agg.set(k, { ...prev, flatKg, upstandKg, totalKg, qty, unitLabel });
+          agg.set(k, {
+            ...prev,
+            flatKg,
+            upstandKg,
+            totalKg,
+            qty,
+            unitLabel,
+            packKgUsed, // ✅ 追加（上書きでOK）
+          });
         }
         continue;
       }
@@ -254,38 +325,93 @@ export default function TajimaSpecCalcPage() {
         continue;
       }
 
-      // jointTapeRoll
-      const add = r.rolls ?? 0;
-      const flatAdd = r.areaKey === "flat" ? add : 0;
-      const upAdd = r.areaKey === "upstand" ? add : 0;
+      // ✅ endTape が rows に混ざっても、このページでは perimeter から別計算するため無視する
+      if (r.kind === "endTape") {
+        continue;
+      }
 
-      const addJoint = r.jointLenM ?? 0;
+      // ✅ ここから jointTapeRoll
+      if (r.kind === "jointTapeRoll") {
+        const add = r.rolls ?? 0;
+        const flatAdd = r.areaKey === "flat" ? add : 0;
+        const upAdd = r.areaKey === "upstand" ? add : 0;
 
-      const meta = metas.tape.get(r.name);
-      const rollLabel = meta?.rollLabel ?? r.rollLabel ?? "巻";
-      const tapeLengthM = meta?.tapeLengthM ?? r.tapeLengthM ?? 0;
+        const addJoint = r.jointLenM ?? 0;
 
-      if (!prev) {
-        agg.set(k, {
-          kind: "jointTapeRoll",
-          name: r.name,
-          flatRolls: flatAdd,
-          upstandRolls: upAdd,
-          totalRolls: add,
-          rollLabel,
-          jointLenM: round1(addJoint),
-          tapeLengthM,
-        });
-      } else if (prev.kind === "jointTapeRoll") {
-        agg.set(k, {
-          ...prev,
-          flatRolls: prev.flatRolls + flatAdd,
-          upstandRolls: prev.upstandRolls + upAdd,
-          totalRolls: prev.totalRolls + add,
-          rollLabel,
-          tapeLengthM,
-          jointLenM: round1(prev.jointLenM + addJoint),
-        });
+        const meta = metas.tape.get(r.name);
+        const rollLabel = meta?.rollLabel ?? r.rollLabel ?? "巻";
+        const tapeLengthM = meta?.tapeLengthM ?? r.tapeLengthM ?? 0;
+
+        if (!prev) {
+          agg.set(k, {
+            kind: "jointTapeRoll",
+            name: r.name,
+            flatRolls: flatAdd,
+            upstandRolls: upAdd,
+            totalRolls: add,
+            rollLabel,
+            jointLenM: round1(addJoint),
+            tapeLengthM,
+          });
+        } else if (prev.kind === "jointTapeRoll") {
+          agg.set(k, {
+            ...prev,
+            flatRolls: prev.flatRolls + flatAdd,
+            upstandRolls: prev.upstandRolls + upAdd,
+            totalRolls: prev.totalRolls + add,
+            rollLabel,
+            tapeLengthM,
+            jointLenM: round1(prev.jointLenM + addJoint),
+          });
+        }
+        continue;
+      }
+    }
+
+    // endTape は「外周(m) / テープ長(m/巻)」で計算（engineのrowsには依存しない）
+    const perimeterM = areaNumbers.perimeter ?? 0;
+    if (perimeterM > 0) {
+      for (const m of spec.materials) {
+        if (m.kind !== "endTape") continue;
+
+        const k = `${m.kind}::${m.name}`;
+
+        // テープ長（m/巻）
+        const meta = metas.endTape.get(m.name);
+        const tapeLengthM = meta?.tapeLengthM ?? m.tapeLengthM ?? 0;
+        if (!tapeLengthM || tapeLengthM <= 0) continue;
+
+        const rollLabel = meta?.rollLabel ?? m.rollLabel ?? "巻";
+
+        // 外周は「平場側」のみで計上（立上りは0固定）
+        const totalQty = perimeterM / tapeLengthM;
+        const flatQty = totalQty;
+        const upstandQty = 0;
+
+        const prev = agg.get(k);
+        if (!prev) {
+          agg.set(k, {
+            kind: "endTape",
+            name: m.name,
+            flatQty,
+            upstandQty,
+            totalQty,
+            rollLabel,
+            tapeLengthM,
+            perimeterM,
+          });
+        } else if (prev.kind === "endTape") {
+          // 同名 endTape が複数定義されても合算できるようにする
+          agg.set(k, {
+            ...prev,
+            flatQty: prev.flatQty + flatQty,
+            upstandQty: prev.upstandQty + upstandQty,
+            totalQty: prev.totalQty + totalQty,
+            rollLabel,
+            tapeLengthM,
+            perimeterM,
+          });
+        }
       }
     }
 
@@ -295,7 +421,7 @@ export default function TajimaSpecCalcPage() {
       if (v) out.push(v);
     }
     return out;
-  }, [rows, spec, metas]);
+  }, [rows, spec, metas, areaNumbers, packKgOverrides]);
 
   // ✅ 編集後の材料名（保存に反映する）
   // 重要：キーは「元の kind::元の name」で固定。名前を変えてもキーが変わらない。
@@ -382,28 +508,53 @@ export default function TajimaSpecCalcPage() {
       ? saveSpecName.trim()
       : spec.displayName;
 
-    // 防水の一覧ページが flat/upstand しか見ていない前提に合わせる
     const flat = areaNumbers.flat ?? 0;
     const upstand = areaNumbers.upstand ?? 0;
+    const perimeter = areaNumbers.perimeter ?? 0;
 
     const rec: SavedCalc = {
       id: uid(),
       savedAt: new Date().toISOString(),
       specId: spec.id,
       displayName,
-      areas: { flat, upstand },
-      aggregated: aggregatedEdited, // ✅ 編集後を保存
+      areas: { flat, upstand, perimeter },
+      aggregated: aggregatedEdited,
     };
 
-    const current = safeJsonParse<SavedCalc[]>(
-      window.localStorage.getItem(STORAGE_KEY),
-      [],
-    );
-    const list = Array.isArray(current) ? current : [];
-    const next = [rec, ...list].slice(0, 50);
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-    setSaveMsg("計算結果を保存しました");
+    try {
+      const current = safeJsonParse<SavedCalc[]>(
+        window.localStorage.getItem(STORAGE_KEY),
+        [],
+      );
+      const list = Array.isArray(current) ? current : [];
+      const next = [rec, ...list].slice(0, 50);
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      setSaveMsg("計算結果を保存しました");
+    } catch {
+      setSaveMsg("保存に失敗しました");
+    }
   };
+
+  // ✅ spec が無い場合でもクラッシュしない（Hooksの後で分岐する）
+  if (!spec) {
+    return (
+      <main className="min-h-screen bg-gray-100 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+        <div className="max-w-3xl mx-auto p-6 space-y-3">
+          <h1 className="text-xl font-extrabold">仕様が見つかりません</h1>
+          <p className="text-sm text-gray-600 dark:text-gray-300">
+            maker: <span className="font-bold">{makerRaw || "(none)"}</span>
+          </p>
+          <p className="text-sm text-gray-600 dark:text-gray-300">
+            specId: <span className="font-bold">{specId || "(none)"}</span>
+          </p>
+          <p className="text-sm text-gray-600 dark:text-gray-300">
+            対応する仕様が specs/{makerRaw}{" "}
+            側の配列に入っているか確認してください。
+          </p>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="min-h-screen bg-gray-100 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
@@ -482,26 +633,62 @@ export default function TajimaSpecCalcPage() {
           <div className="text-sm font-extrabold">施工数量（㎡）</div>
 
           <div className="grid gap-3">
-            {spec.areaFields.map((f) => (
-              <label key={f.key} className="grid gap-1">
-                <span className="text-xs font-bold text-gray-700 dark:text-gray-200">
-                  {f.label}
-                  {f.required ? "（必須）" : ""}
-                </span>
-                <input
-                  inputMode="decimal"
-                  className="w-full rounded-lg border px-3 py-2 text-sm bg-white dark:bg-gray-950 dark:border-gray-800"
-                  value={areas[f.key] ?? ""}
-                  onChange={(e) =>
-                    setAreas((prev) => ({
-                      ...prev,
-                      [f.key]: e.target.value,
-                    }))
-                  }
-                  placeholder="例：120"
-                />
-              </label>
-            ))}
+            {spec.areaFields
+              .filter((f) => f.key !== "perimeter")
+              .map((f) => (
+                <label key={f.key} className="grid gap-1">
+                  <span className="text-xs font-bold text-gray-700 dark:text-gray-200">
+                    {f.label}
+                    {f.required ? "（必須）" : ""}
+                  </span>
+                  <input
+                    inputMode="decimal"
+                    className="w-full rounded-lg border px-3 py-2 text-sm bg-white dark:bg-gray-950 dark:border-gray-800"
+                    value={areas[f.key] ?? ""}
+                    onChange={(e) =>
+                      setAreas((prev) => ({
+                        ...prev,
+                        [f.key]: e.target.value,
+                      }))
+                    }
+                    placeholder="例：120"
+                  />
+                </label>
+              ))}
+
+            {(() => {
+              const perimeterField = spec.areaFields.find(
+                (f) => f.key === "perimeter",
+              );
+              const needsPerimeter =
+                !!perimeterField ||
+                spec.materials.some((m) => m.kind === "endTape");
+              if (!needsPerimeter) return null;
+
+              const label = perimeterField?.label ?? "外周（m）";
+              const required = perimeterField?.required ?? false;
+
+              return (
+                <label className="grid gap-1">
+                  <span className="text-xs font-bold text-gray-700 dark:text-gray-200">
+                    {label}
+                    {required ? "（必須）" : ""}
+                  </span>
+                  <input
+                    inputMode="decimal"
+                    className="w-full rounded-lg border px-3 py-2 text-sm bg-white dark:bg-gray-950 dark:border-gray-800"
+                    value={areas.perimeter ?? ""}
+                    onChange={(e) =>
+                      setAreas((prev) => ({
+                        ...prev,
+                        perimeter: e.target.value,
+                      }))
+                    }
+                    placeholder="例：80"
+                  />
+                </label>
+              );
+            })()}
           </div>
 
           {validationError && (
@@ -577,6 +764,85 @@ export default function TajimaSpecCalcPage() {
                         <span className="font-extrabold">{r.upstandKg}</span> kg
                       </div>
 
+                      {/* ✅ 内容量：packKgOptions がある材料だけ表示 */}
+                      {(() => {
+                        const meta = metas.liquid.get(base?.name ?? r.name);
+                        const specOpts = meta?.packKgOptions;
+
+                        if (!Array.isArray(specOpts) || specOpts.length === 0)
+                          return null;
+
+                        const basePackKg = meta?.packKg;
+
+                        const options = Array.from(
+                          new Set(
+                            specOpts.filter(
+                              (n) =>
+                                typeof n === "number" &&
+                                Number.isFinite(n) &&
+                                n > 0,
+                            ),
+                          ),
+                        ).sort((a, b) => a - b);
+
+                        const selected = packKgOverrides[stableKey];
+
+                        return (
+                          <div className="mt-2">
+                            <div className="text-xs font-bold text-gray-700 dark:text-gray-200">
+                              内容量
+                            </div>
+
+                            <div className="mt-1 grid gap-1">
+                              <select
+                                className="w-full rounded-lg border px-3 py-2 text-sm bg-white dark:bg-gray-950 dark:border-gray-800"
+                                value={
+                                  typeof selected === "number" &&
+                                  Number.isFinite(selected) &&
+                                  selected > 0
+                                    ? String(selected)
+                                    : ""
+                                }
+                                onChange={(e) => {
+                                  const v = e.target.value;
+                                  setPackKgOverrides((prev) => {
+                                    if (!v) {
+                                      const rest = { ...prev };
+                                      delete rest[stableKey];
+                                      return rest;
+                                    }
+                                    const n = Number(v);
+                                    if (!Number.isFinite(n) || n <= 0) {
+                                      const rest = { ...prev };
+                                      delete rest[stableKey];
+                                      return rest;
+                                    }
+                                    return { ...prev, [stableKey]: n };
+                                  });
+                                }}
+                              >
+                                <option value="">
+                                  {typeof basePackKg === "number" &&
+                                  Number.isFinite(basePackKg) &&
+                                  basePackKg > 0
+                                    ? `${basePackKg}kg`
+                                    : "未設定"}
+                                </option>
+                                {options.map((n) => (
+                                  <option key={n} value={String(n)}>
+                                    {n}kg
+                                  </option>
+                                ))}
+                              </select>
+
+                              <div className="text-xs text-gray-600 dark:text-gray-300">
+                                ※選択すると缶数（qty）の計算に反映されます
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })()}
+
                       {r.qty != null && r.unitLabel ? (
                         <>
                           <div className="mt-1 text-sm">
@@ -640,6 +906,33 @@ export default function TajimaSpecCalcPage() {
                       </div>
                       <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
                         （ジョイント長：{round1(r.jointLenM)}m / テープ長：
+                        {r.tapeLengthM}m）
+                      </div>
+                    </div>
+                  )}
+
+                  {/* endTape 表示ブロック */}
+                  {r.kind === "endTape" && (
+                    <div className="mt-2 text-sm">
+                      平場：
+                      <span className="font-extrabold">
+                        {round1(r.flatQty)}
+                      </span>{" "}
+                      巻<span className="mx-2 text-gray-400">/</span>
+                      立上り：
+                      <span className="font-extrabold">
+                        {round1(r.upstandQty)}
+                      </span>{" "}
+                      巻
+                      <div className="mt-1 text-sm">
+                        合計：
+                        <span className="font-extrabold">
+                          {Math.ceil(r.totalQty)}
+                        </span>{" "}
+                        {r.rollLabel}
+                      </div>
+                      <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+                        （外周：{round1(r.perimeterM)}m / テープ長：
                         {r.tapeLengthM}m）
                       </div>
                     </div>

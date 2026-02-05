@@ -1,3 +1,4 @@
+// src/app/sum-quantity/materials/page.tsx
 "use client";
 
 import Link from "next/link";
@@ -5,9 +6,45 @@ import { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx-js-style";
 
 import type { SpecDef } from "./engine";
-import { getTajimaSpec } from "./specs/tajimaSpecs";
 
-type AggRow =
+import { getNipponPaintSpec } from "./specs/nippon";
+import { getKansaiPaintSpec } from "./specs/kansaiPaintSpecs";
+
+import { getWaterproofSpec, type WaterproofMaker } from "./specs/waterproof";
+
+// ✅ 塗装（paint/[maker]/[specId] で保存した計算）
+const PAINT_STORAGE_KEY = "renova:paintCalc:saved:v1";
+
+// ✅ 防水（waterproof/[maker]/[specId] で保存した計算）
+const WATERPROOF_STORAGE_KEY = "renova:waterproofCalc:saved:v1";
+
+const WORKNAME_KEY = "renova:materials:workName:v1";
+
+/* =========================
+   Types (saved schemas)
+========================= */
+
+type PaintAggRow = {
+  kind: "liquidKg";
+  name: string;
+  totalKg: number;
+  qty: number | null;
+  unitLabel: string | null;
+
+  // ✅ 実際に使った内容量（PDF規格表示に使う）
+  packKgUsed?: number | null;
+};
+
+type PaintSavedCalc = {
+  id: string;
+  savedAt: string; // ISO
+  specId: string;
+  displayName: string;
+  areas: Record<string, number>;
+  aggregated: PaintAggRow[];
+};
+
+type WaterproofAggRow =
   | {
       kind: "liquidKg";
       name: string;
@@ -16,6 +53,9 @@ type AggRow =
       totalKg: number;
       qty: number | null;
       unitLabel: string | null;
+
+      // ✅ 実際に使った内容量（PDF規格表示に使う）
+      packKgUsed?: number | null;
     }
   | {
       kind: "sheetRoll";
@@ -34,19 +74,34 @@ type AggRow =
       rollLabel: string;
       jointLenM: number;
       tapeLengthM: number;
+    }
+  | {
+      kind: "endTape";
+      name: string;
+      flatQty: number;
+      upstandQty: number;
+      totalQty: number;
+      rollLabel: string;
+      tapeLengthM: number;
+      perimeterM: number;
     };
 
-const STORAGE_KEY = "renova:tajimaCalc:saved:v1";
-const WORKNAME_KEY = "renova:tajimaCalc:workName:v1";
-
-type SavedCalc = {
+type WaterproofSavedCalc = {
   id: string;
   savedAt: string; // ISO
   specId: string;
   displayName: string;
-  areas: { flat: number; upstand: number };
-  aggregated: AggRow[];
+  areas: { flat: number; upstand: number; perimeter?: number };
+  aggregated: WaterproofAggRow[];
 };
+
+type CombinedRow =
+  | { category: "paint"; rec: PaintSavedCalc }
+  | { category: "waterproof"; rec: WaterproofSavedCalc };
+
+/* =========================
+   Utils
+========================= */
 
 function safeJsonParse<T>(s: string | null, fallback: T): T {
   if (!s) return fallback;
@@ -55,6 +110,125 @@ function safeJsonParse<T>(s: string | null, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null;
+}
+
+function isIsoString(v: unknown): v is string {
+  return typeof v === "string" && v.length > 0;
+}
+
+function isNum(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v);
+}
+
+function isNullableNum(v: unknown): v is number | null {
+  return v === null || isNum(v);
+}
+
+function isNullableStr(v: unknown): v is string | null {
+  return v === null || typeof v === "string";
+}
+
+function isOptionalNullableNum(v: unknown): v is number | null | undefined {
+  return v === undefined || v === null || isNum(v);
+}
+
+function isPaintAggRow(v: unknown): v is PaintAggRow {
+  if (!isObject(v)) return false;
+  return (
+    v.kind === "liquidKg" &&
+    typeof v.name === "string" &&
+    isNum(v.totalKg) &&
+    isNullableNum(v.qty) &&
+    isNullableStr(v.unitLabel) &&
+    isOptionalNullableNum((v as Record<string, unknown>).packKgUsed)
+  );
+}
+
+function isPaintSavedCalc(v: unknown): v is PaintSavedCalc {
+  if (!isObject(v)) return false;
+  if (typeof v.id !== "string") return false;
+  if (!isIsoString(v.savedAt)) return false;
+  if (typeof v.specId !== "string") return false;
+  if (typeof v.displayName !== "string") return false;
+  if (!isObject(v.areas)) return false;
+  if (!Array.isArray(v.aggregated)) return false;
+  for (const r of v.aggregated) if (!isPaintAggRow(r)) return false;
+  return true;
+}
+
+function isWaterproofAggRow(v: unknown): v is WaterproofAggRow {
+  if (!isObject(v)) return false;
+
+  const k = v.kind;
+  if (k === "liquidKg") {
+    return (
+      typeof v.name === "string" &&
+      isNum(v.flatKg) &&
+      isNum(v.upstandKg) &&
+      isNum(v.totalKg) &&
+      isNullableNum(v.qty) &&
+      isNullableStr(v.unitLabel) &&
+      isOptionalNullableNum((v as Record<string, unknown>).packKgUsed)
+    );
+  }
+  if (k === "sheetRoll") {
+    return (
+      typeof v.name === "string" &&
+      isNum(v.flatRolls) &&
+      isNum(v.upstandRolls) &&
+      isNum(v.totalRolls) &&
+      typeof v.rollLabel === "string"
+    );
+  }
+  if (k === "jointTapeRoll") {
+    return (
+      typeof v.name === "string" &&
+      isNum(v.flatRolls) &&
+      isNum(v.upstandRolls) &&
+      isNum(v.totalRolls) &&
+      typeof v.rollLabel === "string" &&
+      isNum(v.jointLenM) &&
+      isNum(v.tapeLengthM)
+    );
+  }
+  if (k === "endTape") {
+    return (
+      typeof v.name === "string" &&
+      isNum(v.flatQty) &&
+      isNum(v.upstandQty) &&
+      isNum(v.totalQty) &&
+      typeof v.rollLabel === "string" &&
+      isNum(v.tapeLengthM) &&
+      isNum(v.perimeterM)
+    );
+  }
+  return false;
+}
+
+function isWaterproofSavedCalc(v: unknown): v is WaterproofSavedCalc {
+  if (!isObject(v)) return false;
+  if (typeof v.id !== "string") return false;
+  if (!isIsoString(v.savedAt)) return false;
+  if (typeof v.specId !== "string") return false;
+  if (typeof v.displayName !== "string") return false;
+  if (!isObject(v.areas)) return false;
+
+  const flat = (v.areas as Record<string, unknown>).flat;
+  const upstand = (v.areas as Record<string, unknown>).upstand;
+  const perimeter = (v.areas as Record<string, unknown>).perimeter;
+
+  if (!isNum(flat)) return false;
+  if (!isNum(upstand)) return false;
+  if (!(perimeter === undefined || isNum(perimeter))) return false;
+
+  if (!Array.isArray(v.aggregated)) return false;
+  for (const r of v.aggregated) if (!isWaterproofAggRow(r)) return false;
+
+  return true;
 }
 
 function fmtDateTimeJp(iso: string) {
@@ -70,89 +244,9 @@ function fmtDateTimeJp(iso: string) {
 function round2(n: number) {
   return Math.round(n * 100) / 100;
 }
-function round3(n: number) {
-  return Math.round(n * 1000) / 1000;
-}
-
-function aggTotalLabel(r: AggRow) {
-  if (r.kind === "liquidKg") {
-    if (r.qty != null && r.unitLabel) return `${r.qty}`;
-    return `${r.totalKg}`;
-  }
-  return `${Math.ceil(r.totalRolls)}`;
-}
-
-function aggUnitLabel(r: AggRow) {
-  if (r.kind === "liquidKg") {
-    if (r.qty != null && r.unitLabel) return r.unitLabel;
-    return "kg";
-  }
-  return r.rollLabel ?? "巻";
-}
-
-function findMaterial(
-  spec: SpecDef | null,
-  r: AggRow,
-): SpecDef["materials"][number] | undefined {
-  if (!spec) return undefined;
-  return spec.materials.find((x) => x.kind === r.kind && x.name === r.name);
-}
 
 function fmtNum(n: number) {
   return Number.isInteger(n) ? String(n) : String(n);
-}
-
-function getSpecText(spec: SpecDef | null, r: AggRow) {
-  const m = findMaterial(spec, r);
-
-  // ✅ 表示用 specText が入っていれば最優先（既存仕様を壊さない）
-  if (m && typeof m.specText === "string" && m.specText.trim() !== "") {
-    return m.specText.trim();
-  }
-
-  if (r.kind === "liquidKg") {
-    if (m && m.kind === "liquidKg") {
-      const packKg = m.packKg ?? null;
-      if (packKg) return `${packKg}kg`;
-    }
-    return "";
-  }
-
-  // ✅ シート：規格に「長さ×幅」（m）
-  if (r.kind === "sheetRoll") {
-    if (m && m.kind === "sheetRoll") {
-      const w = m.sheetWidthM;
-      const l = m.sheetLengthM;
-      if (w > 0 && l > 0) return `${fmtNum(l)}m×${fmtNum(w)}m`;
-    }
-    return "";
-  }
-
-  // ✅ テープ：規格に「長さ×幅」（m × mm）
-  if (r.kind === "jointTapeRoll") {
-    if (m && m.kind === "jointTapeRoll") {
-      const l = m.tapeLengthM;
-      const wmm = m.tapeWidthMm ?? null;
-      if (l > 0 && wmm != null) return `${fmtNum(l)}m×${fmtNum(wmm)}mm`;
-      if (l > 0) return `${fmtNum(l)}m`;
-    }
-    return "";
-  }
-
-  return "";
-}
-
-function usageText(rec: SavedCalc, r: AggRow) {
-  const totalArea = (rec.areas.flat ?? 0) + (rec.areas.upstand ?? 0);
-  if (!(totalArea > 0)) return "";
-
-  if (r.kind === "liquidKg") {
-    const u = round2((r.totalKg ?? 0) / totalArea);
-    return `${u} kg/㎡`;
-  }
-
-  // ✅ シート＆テープは使用量を出さない（空）
-  return "";
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -166,8 +260,181 @@ function downloadBlob(blob: Blob, filename: string) {
   URL.revokeObjectURL(url);
 }
 
-/** まとめてPDF（印刷→PDF保存） */
-function openPrintPdfMany(recs: SavedCalc[], workName: string) {
+/* =========================
+   Spec helpers
+========================= */
+
+function getPaintSpec(specId: string): SpecDef | null {
+  const a = getNipponPaintSpec(specId);
+  if (a) return a;
+  const b = getKansaiPaintSpec(specId);
+  if (b) return b;
+  return null;
+}
+
+const WATERPROOF_MAKERS = [
+  "tajima",
+  "agc",
+] as const satisfies readonly WaterproofMaker[];
+
+function getWaterproofSpecGuess(specId: string): SpecDef | null {
+  for (const mk of WATERPROOF_MAKERS) {
+    const s = getWaterproofSpec(mk, specId);
+    if (s) return s;
+  }
+  return null;
+}
+
+/** spec の liquidKg 同名が複数（平場/立上り）なら平均、1つならそのまま */
+function usagePerM2FromSpec(
+  spec: SpecDef,
+  materialName: string,
+): number | null {
+  const ks: number[] = [];
+  for (const m of spec.materials) {
+    if (m.kind !== "liquidKg") continue;
+    if (m.name !== materialName) continue;
+
+    const v = m.kgPerM2;
+    if (typeof v === "number" && Number.isFinite(v) && v > 0) ks.push(v);
+  }
+  if (ks.length === 0) return null;
+  if (ks.length === 1) return round2(ks[0]);
+  const avg = ks.reduce((a, b) => a + b, 0) / ks.length;
+  return round2(avg);
+}
+
+function findMaterial(
+  spec: SpecDef | null,
+  kind: string,
+  name: string,
+): SpecDef["materials"][number] | undefined {
+  if (!spec) return undefined;
+  return spec.materials.find((x) => x.kind === kind && x.name === name);
+}
+
+function getRowPackKgUsed(r: PaintAggRow | WaterproofAggRow): number | null {
+  if (r.kind !== "liquidKg") return null;
+  const v = (r as { packKgUsed?: unknown }).packKgUsed;
+  if (typeof v === "number" && Number.isFinite(v) && v > 0) return v;
+  return null;
+}
+
+/** ✅ 摘要：specText（無希釈/希釈など）だけ */
+function getNoteTextByRow(
+  spec: SpecDef | null,
+  r: PaintAggRow | WaterproofAggRow,
+) {
+  const m = findMaterial(spec, r.kind, r.name);
+  const t = m ? (m as { specText?: unknown }).specText : undefined;
+  if (typeof t === "string" && t.trim() !== "") return t.trim();
+  return "";
+}
+
+/**
+ * ✅ 規格：入目/寸法だけ（specTextは絶対に返さない）
+ * 優先順： row.packKgUsed（ユーザー選択） > spec.packKg（仕様） > ""
+ */
+function getSpecLabelByRow(
+  spec: SpecDef | null,
+  r: PaintAggRow | WaterproofAggRow,
+) {
+  const m = findMaterial(spec, r.kind, r.name);
+
+  if (r.kind === "liquidKg") {
+    const used = getRowPackKgUsed(r);
+    if (used != null) return `${used}kg`;
+
+    if (m && m.kind === "liquidKg") {
+      const packKg = m.packKg ?? null;
+      if (packKg) return `${packKg}kg`;
+    }
+    return "";
+  }
+
+  if (r.kind === "sheetRoll") {
+    if (m && m.kind === "sheetRoll") {
+      const w = m.sheetWidthM;
+      const l = m.sheetLengthM;
+      if (w > 0 && l > 0) return `${fmtNum(l)}m×${fmtNum(w)}m`;
+    }
+    return "";
+  }
+
+  if (r.kind === "jointTapeRoll") {
+    if (m && m.kind === "jointTapeRoll") {
+      const l = m.tapeLengthM;
+      const wmm = m.tapeWidthMm ?? null;
+      if (l > 0 && wmm != null) return `${fmtNum(l)}m×${fmtNum(wmm)}mm`;
+      if (l > 0) return `${fmtNum(l)}m`;
+    }
+    return "";
+  }
+
+  if (r.kind === "endTape") {
+    if (m && m.kind === "endTape") {
+      const l = m.tapeLengthM;
+      if (l > 0) return `${fmtNum(l)}m`;
+    }
+    return "";
+  }
+
+  return "";
+}
+
+function aggTotalLabel(
+  category: CombinedRow["category"],
+  r: PaintAggRow | WaterproofAggRow,
+) {
+  if (r.kind === "liquidKg") {
+    if (r.qty != null) return `${r.qty}`;
+    return `${r.totalKg}`;
+  }
+
+  if (r.kind === "sheetRoll" || r.kind === "jointTapeRoll") {
+    return `${Math.ceil(r.totalRolls)}`;
+  }
+
+  if (r.kind === "endTape") {
+    return `${Math.ceil(r.totalQty)}`;
+  }
+
+  return "";
+}
+
+function aggUnitLabel(r: PaintAggRow | WaterproofAggRow) {
+  if (r.kind === "liquidKg") {
+    if (r.qty != null) return r.unitLabel ?? "缶";
+    return "kg";
+  }
+  if (r.kind === "sheetRoll" || r.kind === "jointTapeRoll") {
+    return r.rollLabel ?? "巻";
+  }
+  if (r.kind === "endTape") {
+    return r.rollLabel ?? "巻";
+  }
+  return "";
+}
+
+/** ✅ 使用量は spec の kgPerM2 をそのまま（平場/立上りで違えば平均） */
+function usageTextForRow(
+  spec: SpecDef | null,
+  r: PaintAggRow | WaterproofAggRow | undefined,
+) {
+  if (!r) return "";
+  if (!spec) return "";
+  if (r.kind !== "liquidKg") return "";
+
+  const u = usagePerM2FromSpec(spec, r.name);
+  if (u == null) return "";
+  return `${u} kg/㎡`;
+}
+
+/* =========================
+   PDF / Excel (Many)
+========================= */
+
+function openPrintPdfMany(recs: CombinedRow[], workName: string) {
   if (typeof window === "undefined") return;
   const w = window.open("", "_blank");
   if (!w) return;
@@ -175,25 +442,41 @@ function openPrintPdfMany(recs: SavedCalc[], workName: string) {
   const safeWorkName = workName.trim();
 
   const blocksHtml = recs
-    .map((rec, i) => {
-      const spec = getTajimaSpec(rec.specId);
+    .map((x, i) => {
+      const isPaint = x.category === "paint";
+      const spec = isPaint
+        ? getPaintSpec(x.rec.specId)
+        : getWaterproofSpecGuess(x.rec.specId);
 
-      const headerLine = `${i + 1}・${spec?.displayName ?? rec.displayName}　平場 ${
-        rec.areas.flat
-      }㎡　立上り ${rec.areas.upstand}㎡`;
+      const headerAreas = (() => {
+        if (x.category === "paint") {
+          const area = (x.rec.areas as Record<string, number>).area ?? 0;
+          return `面積 ${area}㎡`;
+        }
+        const flat = x.rec.areas.flat ?? 0;
+        const up = x.rec.areas.upstand ?? 0;
+        return `平場 ${flat}㎡　立上り ${up}㎡`;
+      })();
 
-      const rowsHtml = rec.aggregated
+      const headerLine = `${i + 1}・${spec?.displayName ?? x.rec.displayName}　${headerAreas}`;
+
+      const rowsHtml = x.rec.aggregated
+        .filter(
+          (r): r is PaintAggRow | WaterproofAggRow =>
+            !!r && typeof r === "object",
+        )
         .map((r) => {
-          const specText = getSpecText(spec, r);
-          const usage = usageText(rec, r);
-          const req = aggTotalLabel(r);
+          const noteText = getNoteTextByRow(spec, r);
+          const specLabel = getSpecLabelByRow(spec, r);
+          const usage = usageTextForRow(spec, r);
+          const req = aggTotalLabel(x.category, r);
           const unit = aggUnitLabel(r);
 
           return `
             <tr>
               <td class="c-name">${r.name}</td>
-              <td class="c-note"></td>
-              <td class="c-spec">${specText}</td>
+              <td class="c-note">${noteText}</td>
+              <td class="c-spec">${specLabel}</td>
               <td class="c-use">${usage}</td>
               <td class="c-req">${req}</td>
               <td class="c-unit">${unit}</td>
@@ -218,6 +501,7 @@ function openPrintPdfMany(recs: SavedCalc[], workName: string) {
             </thead>
             <tbody>${rowsHtml}</tbody>
           </table>
+          <div class="savedAt">保存日時：${fmtDateTimeJp(x.rec.savedAt)}</div>
         </div>
       `;
     })
@@ -294,7 +578,7 @@ function openPrintPdfMany(recs: SavedCalc[], workName: string) {
   w.document.close();
 }
 
-function exportExcelMany(recs: SavedCalc[], workName: string) {
+function exportExcelMany(recs: CombinedRow[], workName: string) {
   if (typeof window === "undefined") return;
 
   type AOA = Array<Array<string | number | null>>;
@@ -325,11 +609,23 @@ function exportExcelMany(recs: SavedCalc[], workName: string) {
 
   const tableRanges: Array<{ r1: number; r2: number }> = [];
 
-  recs.forEach((rec, idx) => {
-    const spec = getTajimaSpec(rec.specId);
-    const line = `${idx + 1}・${spec?.displayName ?? rec.displayName}　平場 ${
-      rec.areas.flat
-    }㎡　立上り ${rec.areas.upstand}㎡`;
+  recs.forEach((x, idx) => {
+    const isPaint = x.category === "paint";
+    const spec = isPaint
+      ? getPaintSpec(x.rec.specId)
+      : getWaterproofSpecGuess(x.rec.specId);
+
+    const headerAreas = (() => {
+      if (x.category === "paint") {
+        const area = (x.rec.areas as Record<string, number>).area ?? 0;
+        return `面積 ${area}㎡`;
+      }
+      const flat = x.rec.areas.flat ?? 0;
+      const up = x.rec.areas.upstand ?? 0;
+      return `平場 ${flat}㎡　立上り ${up}㎡`;
+    })();
+
+    const line = `${idx + 1}・${spec?.displayName ?? x.rec.displayName}　${headerAreas}`;
 
     pushRow([line, null, null, null, null, null]);
     rowNo++;
@@ -338,19 +634,31 @@ function exportExcelMany(recs: SavedCalc[], workName: string) {
     rowNo++;
     const headRow = rowNo;
 
-    rec.aggregated.forEach((r) => {
-      const specText = getSpecText(spec, r);
-      const usage = usageText(rec, r);
-      const req = aggTotalLabel(r);
-      const unit = aggUnitLabel(r);
+    x.rec.aggregated
+      .filter(
+        (r): r is PaintAggRow | WaterproofAggRow =>
+          !!r && typeof r === "object",
+      )
+      .forEach((r) => {
+        const specText = getSpecTextByRow(spec, r); // ✅ ここがポイント
+        const usage = usageTextForRow(spec, r);
+        const req = aggTotalLabel(x.category, r);
+        const unit = aggUnitLabel(r);
 
-      pushRow([r.name, "", specText, usage, req, unit]);
-      rowNo++;
-    });
+        pushRow([r.name, "", specText, usage, req, unit]);
+        rowNo++;
+      });
 
     const lastDetailRow = rowNo;
 
-    pushRow([`保存日時：${fmtDateTimeJp(rec.savedAt)}`, null, null, null, null, null]);
+    pushRow([
+      `保存日時：${fmtDateTimeJp(x.rec.savedAt)}`,
+      null,
+      null,
+      null,
+      null,
+      null,
+    ]);
     rowNo++;
 
     pushRow([null, null, null, null, null, null]);
@@ -450,7 +758,10 @@ function exportExcelMany(recs: SavedCalc[], workName: string) {
     const col2 = a[1];
 
     const isHeader =
-      col1 === "品名" && col2 === "摘要" && a[2] === "規格" && a[3] === "使用量";
+      col1 === "品名" &&
+      col2 === "摘要" &&
+      a[2] === "規格" &&
+      a[3] === "使用量";
 
     if (typeof col1 === "string" && col1.startsWith("保存日時：")) {
       setStyle(r, 1, styleSavedAt);
@@ -490,24 +801,51 @@ function exportExcelMany(recs: SavedCalc[], workName: string) {
     type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   });
 
-  const filename = `ウレタン要缶数計算書_${new Date().toISOString().slice(0, 10)}.xlsx`;
-
+  const filename = `要缶数計算書_${new Date().toISOString().slice(0, 10)}.xlsx`;
   downloadBlob(blob, filename);
 }
 
+/* =========================
+   Page
+========================= */
+
 export default function MaterialsMenuPage() {
-  const [saved, setSaved] = useState<SavedCalc[]>([]);
+  const [paintSaved, setPaintSaved] = useState<PaintSavedCalc[]>([]);
+  const [waterproofSaved, setWaterproofSaved] = useState<WaterproofSavedCalc[]>(
+    [],
+  );
   const [workName, setWorkName] = useState<string>("");
 
   useEffect(() => {
-    const list = safeJsonParse<SavedCalc[]>(
-      typeof window !== "undefined" ? window.localStorage.getItem(STORAGE_KEY) : null,
-      [],
-    );
-    setSaved(Array.isArray(list) ? list : []);
+    const paintRaw =
+      typeof window !== "undefined"
+        ? window.localStorage.getItem(PAINT_STORAGE_KEY)
+        : null;
+    const wpRaw =
+      typeof window !== "undefined"
+        ? window.localStorage.getItem(WATERPROOF_STORAGE_KEY)
+        : null;
+
+    const paintParsed = safeJsonParse<unknown>(paintRaw, []);
+    const wpParsed = safeJsonParse<unknown>(wpRaw, []);
+
+    const nextPaint: PaintSavedCalc[] = [];
+    if (Array.isArray(paintParsed)) {
+      for (const it of paintParsed)
+        if (isPaintSavedCalc(it)) nextPaint.push(it);
+    }
+    setPaintSaved(nextPaint);
+
+    const nextWp: WaterproofSavedCalc[] = [];
+    if (Array.isArray(wpParsed)) {
+      for (const it of wpParsed) if (isWaterproofSavedCalc(it)) nextWp.push(it);
+    }
+    setWaterproofSaved(nextWp);
 
     const wn =
-      typeof window !== "undefined" ? window.localStorage.getItem(WORKNAME_KEY) : null;
+      typeof window !== "undefined"
+        ? window.localStorage.getItem(WORKNAME_KEY)
+        : null;
     setWorkName(wn ?? "");
   }, []);
 
@@ -516,28 +854,42 @@ export default function MaterialsMenuPage() {
     window.localStorage.setItem(WORKNAME_KEY, workName);
   }, [workName]);
 
-  const persistSaved = (next: SavedCalc[]) => {
-    setSaved(next);
+  const combinedTop = useMemo<CombinedRow[]>(() => {
+    const list: CombinedRow[] = [];
+
+    for (const r of paintSaved) list.push({ category: "paint", rec: r });
+    for (const r of waterproofSaved)
+      list.push({ category: "waterproof", rec: r });
+
+    list.sort((a, b) => {
+      const ta = new Date(a.rec.savedAt).getTime();
+      const tb = new Date(b.rec.savedAt).getTime();
+      return tb - ta;
+    });
+
+    return list.slice(0, 50);
+  }, [paintSaved, waterproofSaved]);
+
+  const persistPaint = (next: PaintSavedCalc[]) => {
+    setPaintSaved(next);
     if (typeof window !== "undefined") {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      window.localStorage.setItem(PAINT_STORAGE_KEY, JSON.stringify(next));
     }
   };
 
-  const onDeleteSaved = (id: string) => {
-    const next = saved.filter((x) => x.id !== id);
-    persistSaved(next);
+  const persistWaterproof = (next: WaterproofSavedCalc[]) => {
+    setWaterproofSaved(next);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(WATERPROOF_STORAGE_KEY, JSON.stringify(next));
+    }
   };
 
-  const savedTop = useMemo(() => saved.slice(0, 50), [saved]);
-
-  const onPdfAll = () => {
-    if (savedTop.length === 0) return;
-    openPrintPdfMany(savedTop, workName);
-  };
-
-  const onExcelAll = () => {
-    if (savedTop.length === 0) return;
-    exportExcelMany(savedTop, workName);
+  const onDeleteSaved = (category: CombinedRow["category"], id: string) => {
+    if (category === "paint") {
+      persistPaint(paintSaved.filter((x) => x.id !== id));
+      return;
+    }
+    persistWaterproof(waterproofSaved.filter((x) => x.id !== id));
   };
 
   const onDeleteAllSaved = () => {
@@ -545,7 +897,29 @@ export default function MaterialsMenuPage() {
       const ok = window.confirm("保存一覧をすべて削除します。よろしいですか？");
       if (!ok) return;
     }
-    persistSaved([]);
+    persistPaint([]);
+    persistWaterproof([]);
+  };
+
+  const onPdfAll = () => {
+    if (combinedTop.length === 0) return;
+    openPrintPdfMany(combinedTop, workName);
+  };
+
+  const onExcelAll = () => {
+    if (combinedTop.length === 0) return;
+    exportExcelMany(combinedTop, workName);
+  };
+
+  const categoryLabel = (c: CombinedRow["category"]) =>
+    c === "paint" ? "塗装" : "防水";
+
+  const areaLabel = (x: CombinedRow) => {
+    if (x.category === "paint") {
+      const area = (x.rec.areas as Record<string, number>).area ?? 0;
+      return `面積 ${area}㎡`;
+    }
+    return `平場 ${x.rec.areas.flat}㎡ ／ 立上り ${x.rec.areas.upstand}㎡`;
   };
 
   return (
@@ -606,7 +980,7 @@ export default function MaterialsMenuPage() {
               <button
                 type="button"
                 onClick={onPdfAll}
-                disabled={savedTop.length === 0}
+                disabled={combinedTop.length === 0}
                 className="rounded-lg border px-3 py-2 text-xs font-extrabold hover:opacity-80 disabled:opacity-40 dark:border-gray-800"
               >
                 まとめてPDF
@@ -615,7 +989,7 @@ export default function MaterialsMenuPage() {
               <button
                 type="button"
                 onClick={onExcelAll}
-                disabled={savedTop.length === 0}
+                disabled={combinedTop.length === 0}
                 className="rounded-lg border px-3 py-2 text-xs font-extrabold hover:opacity-80 disabled:opacity-40 dark:border-gray-800"
               >
                 まとめてExcel
@@ -624,7 +998,7 @@ export default function MaterialsMenuPage() {
               <button
                 type="button"
                 onClick={onDeleteAllSaved}
-                disabled={savedTop.length === 0}
+                disabled={combinedTop.length === 0}
                 className="rounded-lg border px-3 py-2 text-xs font-extrabold text-red-600 hover:opacity-80 disabled:opacity-40 dark:border-gray-800"
               >
                 まとめて削除
@@ -632,27 +1006,31 @@ export default function MaterialsMenuPage() {
             </div>
           </div>
 
-          {savedTop.length > 0 ? (
+          {combinedTop.length > 0 ? (
             <div className="grid gap-2">
-              {savedTop.slice(0, 20).map((rec) => (
+              {combinedTop.slice(0, 20).map((x) => (
                 <div
-                  key={rec.id}
+                  key={`${x.category}:${x.rec.id}`}
                   className="rounded-lg border p-3 flex items-start justify-between gap-3 dark:border-gray-800"
                 >
                   <div className="min-w-0">
-                    <div className="text-sm font-extrabold truncate">
-                      {rec.displayName}
+                    <div className="text-xs font-extrabold text-gray-600 dark:text-gray-300">
+                      {categoryLabel(x.category)}
                     </div>
+
+                    <div className="mt-1 text-sm font-extrabold truncate">
+                      {x.rec.displayName}
+                    </div>
+
                     <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                      保存：{fmtDateTimeJp(rec.savedAt)} ／ 平場 {rec.areas.flat}㎡ ／
-                      立上り {rec.areas.upstand}㎡
+                      保存：{fmtDateTimeJp(x.rec.savedAt)} ／ {areaLabel(x)}
                     </div>
                   </div>
 
                   <div className="shrink-0 flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => openPrintPdfMany([rec], workName)}
+                      onClick={() => openPrintPdfMany([x], workName)}
                       className="rounded-lg border px-3 py-2 text-xs font-extrabold hover:opacity-80 dark:border-gray-800"
                     >
                       PDF
@@ -660,7 +1038,7 @@ export default function MaterialsMenuPage() {
 
                     <button
                       type="button"
-                      onClick={() => exportExcelMany([rec], workName)}
+                      onClick={() => exportExcelMany([x], workName)}
                       className="rounded-lg border px-3 py-2 text-xs font-extrabold hover:opacity-80 dark:border-gray-800"
                     >
                       Excel
@@ -668,7 +1046,7 @@ export default function MaterialsMenuPage() {
 
                     <button
                       type="button"
-                      onClick={() => onDeleteSaved(rec.id)}
+                      onClick={() => onDeleteSaved(x.category, x.rec.id)}
                       className="rounded-lg border px-3 py-2 text-xs font-extrabold text-red-600 hover:opacity-80 dark:border-gray-800"
                     >
                       削除

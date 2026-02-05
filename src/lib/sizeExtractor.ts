@@ -20,13 +20,6 @@ function isRecord(v: unknown): v is JsonObject {
   return typeof v === "object" && v !== null;
 }
 
-function toStr(v: unknown): string {
-  if (typeof v === "string") return v;
-  if (typeof v === "number") return String(v);
-  if (v == null) return "";
-  return String(v);
-}
-
 /** 全角英数記号：FF01-FF5E -> 21-7E */
 function toHalfWidthAscii(s: string): string {
   return s.replace(/[！-～]/g, (ch) =>
@@ -48,7 +41,11 @@ function clampInt(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.trunc(n)));
 }
 
-function clampMm(n: number | null, min: number, max: number): number | undefined {
+function clampMm(
+  n: number | null,
+  min: number,
+  max: number,
+): number | undefined {
   if (n == null) return undefined;
   if (!Number.isFinite(n)) return undefined;
   return clampInt(n, min, max);
@@ -264,9 +261,7 @@ export async function parseSizesByAiBatch(params: {
   const user = `
 以下の行テキストからサイズを推定してください。
 
-${rows
-  .map((r) => `ROW${r.rowIndex}: ${r.text}`)
-  .join("\n")}
+${rows.map((r) => `ROW${r.rowIndex}: ${r.text}`).join("\n")}
 `.trim();
 
   // Responses API（SDK v4系想定）

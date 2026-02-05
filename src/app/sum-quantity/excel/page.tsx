@@ -22,11 +22,7 @@ import {
   toPositiveNumberOrNull,
 } from "@/app/features/excel-sum/utils";
 
-import {
-  formatSize,
-  guessDefaultCalcM,
-  guessDefaultCalcM2PerEach,
-} from "@/app/features/excel-sum/size";
+import { formatSize, guessDefaultCalcM } from "@/app/features/excel-sum/size";
 
 import {
   loadSavedExcelSums,
@@ -70,7 +66,8 @@ export default function Page() {
   // ✅ ③除外キーワード（表示から除外したい行）
   const [excelExcludeKeyword, setExcelExcludeKeyword] = useState("");
   // ✅ ③除外キーワード（②を押した時に反映する用）
-  const [excelExcludeKeywordApplied, setExcelExcludeKeywordApplied] = useState("");
+  const [excelExcludeKeywordApplied, setExcelExcludeKeywordApplied] =
+    useState("");
 
   // ★ 要件：このExcel想定の初期値（1始まり）
   const [itemCol1Based, setItemCol1Based] = useState(""); // 品名
@@ -510,6 +507,7 @@ export default function Page() {
   }
 
   // スペース区切り → OR 用トークン（短すぎ英数字は除外）
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   function splitKeywords(raw: string): string[] {
     const parts = raw
       .trim()
@@ -528,8 +526,11 @@ export default function Page() {
     return Array.from(new Set(tokens));
   }
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   function rowTextForMatch(r: ExcelSumPreviewRow): string {
-    return normalizeForSearch(`${r.item ?? ""} ${r.desc ?? ""} ${r.unit ?? ""}`);
+    return normalizeForSearch(
+      `${r.item ?? ""} ${r.desc ?? ""} ${r.unit ?? ""}`,
+    );
   }
 
   function includesAnyToken(textNorm: string, tokens: string[]): boolean {
@@ -659,16 +660,18 @@ export default function Page() {
       setExcelKeyword2Loading(false);
     }
   }, [
-    excelCode,
     excelFile,
     excelSheetName,
-    excelKeyword2,
-    excelExcludeKeyword,
+    excelCode,
     excelResult,
+    excelKeyword2,
     validateManualCols,
+    splitKeywords,
+    excelExcludeKeyword,
     appendManualCols,
     appendAmountFilter,
     appendAiSizeFlags,
+    rowTextForMatch,
   ]);
 
   // ✅ 除外キーワード（ORで除外）を適用したプレビュー
@@ -686,7 +689,7 @@ export default function Page() {
       // OR: どれか1つでも含むなら除外
       return !includesAnyToken(text, exTokens);
     });
-  }, [excelResult, excelExcludeKeywordApplied]);
+  }, [excelResult, excelExcludeKeywordApplied, splitKeywords, rowTextForMatch]);
 
   // ✅ 単位別合計（表示用：除外後）
   const sumsByUnit = useMemo(() => {
@@ -746,36 +749,6 @@ export default function Page() {
     [],
   );
 
-  // ✅ 箇所のデフォルト（㎡/箇所）（新：hasExplicitSizeTextフラグ対応）
-  const getDefaultM2EachForRow = useCallback(
-    (r: ExcelSumPreviewRow, hasExplicitSizeText: boolean): number | null => {
-      // ✅ 方針：m 以外はサイズ自動抽出しない
-      // 箇所は事故が多いので、サイズ文字列が無い場合は自動推定しない（入力必須）
-      if (!hasExplicitSizeText) {
-        return null;
-      }
-
-      const w =
-        typeof r.wideMm === "number" && Number.isFinite(r.wideMm)
-          ? r.wideMm
-          : null;
-      const l =
-        typeof r.lengthMm === "number" && Number.isFinite(r.lengthMm)
-          ? r.lengthMm
-          : null;
-
-      if (w != null && l != null) {
-        const m2 = (w * l) / 1_000_000;
-        if (m2 <= 0) return null;
-        return Number(m2.toFixed(3));
-      }
-
-      // 明示サイズが無いなら上で null。ここも推定はしない。
-      return null;
-    },
-    [],
-  );
-
   // ✅ 入力1つで㎡換算（m / 箇所 / その他）＋ ㎡はそのまま
   const calcM2FromInputOrExisting = useCallback(
     (r: ExcelSumPreviewRow): number | null => {
@@ -814,7 +787,7 @@ export default function Page() {
       const m2 = r.qty * n;
       return Number.isFinite(m2) ? m2 : null;
     },
-    [calcMmByRow, getM2Already, getDefaultMForRow, getDefaultM2EachForRow],
+    [calcMmByRow, getM2Already, getDefaultMForRow],
   );
 
   // --- Helpers for recalculating client-side ㎡合計 after row deletion ---
@@ -1027,9 +1000,7 @@ export default function Page() {
         {excelFile ? (
           <>
             <div className="rounded border p-3 dark:border-gray-800 space-y-2">
-              <div className="text-sm font-extrabold">
-                列指定
-              </div>
+              <div className="text-sm font-extrabold">列指定</div>
               <div className="mt-1 text-[11px] leading-relaxed opacity-80">
                 エクセルシート内で「名称・摘要・数量・単位・サイズ」が書かれている表（枠）の、先頭列の番号を指定してください。
                 AIの自動抽出は間違うことがあるため、合わない場合は手動で調整してください。
@@ -1055,7 +1026,6 @@ export default function Page() {
                 列番号は「結合セルを1つとして数える」のではなく、Excel上の実セル（A=1,
                 B=2, C=3...）の位置で数えて入力してください
               </div>
-
 
               <div className="overflow-x-auto">
                 <div className="flex items-end gap-3 min-w-max text-sm">
@@ -1312,7 +1282,9 @@ export default function Page() {
                 </div>
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
                   <div className="flex-1">
-                    <div className="mt-2 text-xs font-extrabold">除外キーワード（ORで除外）</div>
+                    <div className="mt-2 text-xs font-extrabold">
+                      除外キーワード（ORで除外）
+                    </div>
                     <input
                       value={excelExcludeKeyword}
                       onChange={(e) => setExcelExcludeKeyword(e.target.value)}
@@ -1320,7 +1292,8 @@ export default function Page() {
                       placeholder="例：端末 シーリング 共通 No.8に含む"
                     />
                     <div className="mt-1 text-[11px] opacity-80">
-                      ※ スペース区切りで入力。②「さらに絞る」を押した時点の入力で、1つでも含む行を表示から除外します（OR）。
+                      ※
+                      スペース区切りで入力。②「さらに絞る」を押した時点の入力で、1つでも含む行を表示から除外します（OR）。
                     </div>
                   </div>
                   <button
@@ -1413,7 +1386,9 @@ export default function Page() {
             </div>
 
             <div className="rounded border p-3 dark:border-gray-800">
-              <div className="text-xs font-bold mb-2">プレビュー（除外適用後）</div>
+              <div className="text-xs font-bold mb-2">
+                プレビュー（除外適用後）
+              </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
@@ -1439,7 +1414,8 @@ export default function Page() {
                         /m/i.test(rawUnit) &&
                         !/[ヶ箇]/.test(rawUnit);
 
-                      const isKasho = unitNorm === "箇所" || /[ヶ箇]所/.test(rawUnit);
+                      const isKasho =
+                        unitNorm === "箇所" || /[ヶ箇]所/.test(rawUnit);
                       const isM2 = unitNorm === "㎡";
 
                       // ✅ 寸法は m の行だけ計算＆表示
