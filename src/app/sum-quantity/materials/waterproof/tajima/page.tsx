@@ -1,72 +1,35 @@
 import Link from "next/link";
 import { getWaterproofSpecs } from "@/app/sum-quantity/materials/specs/waterproof";
-import { TAJIMA_SPEC_SECTIONS } from "@/app/sum-quantity/materials/specs/tajimaSpecs";
-import type { SpecDef } from "@/app/sum-quantity/materials/engine";
-
-type SectionView = {
-  sectionId: string; // "gojin" | "ortack-ace" | "other" など許可
-  title: string;
-  specs: SpecDef[];
-};
 
 export default function TajimaSpecListPage() {
-  const allSpecs = getWaterproofSpecs("tajima");
-
-  // 1) 定義済みのセクション順で並べる
-  const sections: SectionView[] = TAJIMA_SPEC_SECTIONS.map((sec) => ({
-    sectionId: sec.sectionId,
-    title: sec.title,
-    specs: sec.specs,
-  }));
-
-  // 2) セクション未所属があれば「その他」に入れる（必要なら）
-  const sectionSpecIds = new Set(
-    sections.flatMap((sec) => sec.specs.map((s) => s.id))
-  );
-  const ungrouped = allSpecs.filter((s) => !sectionSpecIds.has(s.id));
-  if (ungrouped.length > 0) {
-    sections.push({ sectionId: "other", title: "その他", specs: ungrouped });
-  }
+  const specs = getWaterproofSpecs("tajima");
 
   return (
     <main className="min-h-screen bg-gray-100 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
       <div className="max-w-3xl mx-auto p-6 space-y-6">
         <header className="space-y-1">
-          <h1 className="text-xl font-extrabold">タジマルーフィング：仕様一覧</h1>
+          <h1 className="text-xl font-extrabold">
+            タジマルーフィング：仕様一覧
+          </h1>
           <p className="text-sm text-gray-600 dark:text-gray-300">
             仕様を選択して必要数量表を作成します
           </p>
         </header>
 
-        {/* ✅ セクション表示 */}
-        <div className="space-y-10">
-          {sections.map((sec) => (
-            <section key={sec.sectionId} className="space-y-3">
-              <div className="px-1">
-                <div className="text-xs font-extrabold tracking-wider text-gray-500 dark:text-gray-400">
-                  {sec.title}
-                </div>
+        <div className="grid gap-4">
+          {specs.map((s) => (
+            <Link
+              key={s.id}
+              href={`/sum-quantity/materials/waterproof/tajima/${encodeURIComponent(s.id)}`}
+              className="rounded-xl border bg-white p-5 shadow-sm hover:shadow transition dark:border-gray-800 dark:bg-gray-900"
+            >
+              <div className="text-base font-extrabold">
+                {s.displayName ?? s.id}
               </div>
-
-              <div className="grid gap-4">
-                {sec.specs.map((s) => (
-                  <Link
-                    key={s.id}
-                    href={`/sum-quantity/materials/waterproof/tajima/${encodeURIComponent(
-                      s.id
-                    )}`}
-                    className="rounded-xl border bg-white p-5 shadow-sm hover:shadow transition dark:border-gray-800 dark:bg-gray-900"
-                  >
-                    <div className="text-base font-extrabold">
-                      {s.displayName ?? s.id}
-                    </div>
-                    <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                      入力 → 算出
-                    </div>
-                  </Link>
-                ))}
+              <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                入力 → 算出
               </div>
-            </section>
+            </Link>
           ))}
         </div>
       </div>

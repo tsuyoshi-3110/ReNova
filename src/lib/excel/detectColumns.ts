@@ -7,10 +7,7 @@ function toStr(v: unknown): string {
 }
 
 function normalizeText(s: string): string {
-  return s
-    .replace(/[－―ー−]/g, "-")
-    .replace(/\s+/g, " ")
-    .trim();
+  return s.replace(/[－―ー−]/g, "-").replace(/\s+/g, " ").trim();
 }
 
 function normalizeUnit(uRaw: string): string {
@@ -57,29 +54,10 @@ function looksLikeUnit(sRaw: string): boolean {
 function isHeaderLike(s: string): boolean {
   const t = normalizeText(s);
   if (!t) return false;
-
-  // ✅ 1文字ヘッダーも拾う（ロジュマン対策）
-  const keys = [
-    "数量",
-    "単位",
-    "金額",
-    "単価",
-    "摘要",
-    "品名",
-    "名称",
-    "仕様",
-    "規格",
-    "内容",
-
-    // 追加
-    "名",
-    "称",
-    "摘",
-    "要",
-  ];
-
-  return keys.some((k) => t === k || t.includes(k));
+  const keys = ["数量", "単位", "金額", "摘要", "品名", "名称", "仕様", "規格"];
+  return keys.some((k) => t.includes(k));
 }
+
 function detectHeaderRowIndex(rows: unknown[][]): number | null {
   const max = Math.min(rows.length, 40);
   for (let i = 0; i < max; i++) {
@@ -109,82 +87,41 @@ function detectColsByHeader(row: unknown[]): {
     amount: null as number | null,
   };
 
-  // 1セル文字（例: "名"）＋隣セル（例: "称"）を連結して判定できるようにする
-  const cell = (c: number) => normalizeText(toStr(row[c] ?? ""));
-  const join2 = (c: number) => (cell(c) + cell(c + 1)).trim();
-  const join3 = (c: number) => (cell(c) + cell(c + 1) + cell(c + 2)).trim();
-
   for (let c = 0; c < row.length; c++) {
-    const t1 = cell(c);
-    if (!t1) continue;
+    const t = normalizeText(toStr(row[c]));
+    if (!t) continue;
 
-    const t2 = c + 1 < row.length ? join2(c) : "";
-    const t3 = c + 2 < row.length ? join3(c) : "";
+    if (map.qty == null && (t.includes("数量") || t.includes("数"))) map.qty = c;
+    if (map.unit == null && t.includes("単位")) map.unit = c;
 
-    // --- 数量 / 単位 / 金額系（ここは従来通りでOK。ついでに分割も拾う） ---
-    if (map.qty == null) {
-      if (t1.includes("数量") || t1 === "数" || t2.includes("数量")) map.qty = c;
-    }
-    if (map.unit == null) {
-      if (t1.includes("単位") || t2.includes("単位")) map.unit = c;
-    }
-    if (map.amount == null) {
-      const hit =
-        t1.includes("金額") ||
-        t1 === "金" ||
-        t1.includes("単価") ||
-        t1.includes("価格") ||
-        t2.includes("金額") ||
-        t2.includes("単価") ||
-        t3.includes("金額");
-      if (hit) map.amount = c;
+    if (
+      map.amount == null &&
+      (t.includes("金額") ||
+        t.includes("金") ||
+        t.includes("単価") ||
+        t.includes("価格"))
+    ) {
+      map.amount = c;
     }
 
-    // --- 品名/名称（「名」「称」分割にも対応） ---
-    if (map.item == null) {
-      const hit =
-        t1.includes("品名") ||
-        t1.includes("名称") ||
-        t1.includes("工種") ||
-        t1.includes("項目") ||
-        t2.includes("品名") ||
-        t2.includes("名称") || // "名"+"称"
-        t3.includes("名称");
-      if (hit) map.item = c;
+    if (
+      map.item == null &&
+      (t.includes("品名") ||
+        t.includes("名称") ||
+        t.includes("工種") ||
+        t.includes("項目"))
+    ) {
+      map.item = c;
     }
 
-    // --- 摘要/仕様/規格/内容（「摘」「要」分割にも対応） ---
-    if (map.desc == null) {
-      const hit =
-        t1.includes("摘要") ||
-        t1.includes("仕様") ||
-        t1.includes("規格") ||
-        t1.includes("内容") ||
-        t2.includes("摘要") || // "摘"+"要"
-        t2.includes("仕様") ||
-        t2.includes("規格") ||
-        t2.includes("内容") ||
-        t3.includes("摘要");
-      if (hit) map.desc = c;
-    }
-  }
-
-  // ★ 追加の保険：ロジュマン形式（名/称、摘/要）に強制対応
-  // もし "名"+"称" で item が取れていなければ、"名"側を item に寄せる
-  if (map.item == null) {
-    for (let c = 0; c + 1 < row.length; c++) {
-      if (join2(c) === "名称") {
-        map.item = c;
-        break;
-      }
-    }
-  }
-  if (map.desc == null) {
-    for (let c = 0; c + 1 < row.length; c++) {
-      if (join2(c) === "摘要") {
-        map.desc = c; // "摘" 側
-        break;
-      }
+    if (
+      map.desc == null &&
+      (t.includes("摘要") ||
+        t.includes("仕様") ||
+        t.includes("規格") ||
+        t.includes("内容"))
+    ) {
+      map.desc = c;
     }
   }
 
@@ -279,7 +216,7 @@ function buildColStats(rows: unknown[][], maxCols: number): ColStats[] {
 
 function pickBest(
   stats: ColStats[],
-  scoreFn: (s: ColStats) => number,
+  scoreFn: (s: ColStats) => number
 ): number | null {
   let bestCol: number | null = null;
   let bestScore = -Infinity;

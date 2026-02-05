@@ -405,11 +405,13 @@ function useProjectsList(db0: Firestore, uid: string | null) {
   return { projects, loading, slow };
 }
 
-function useMemberRevokedSync(db0: Firestore, uid: string | null, projects: Project[]) {
+function useMemberRevokedSync(
+  db0: Firestore,
+  uid: string | null,
+  projects: Project[],
+) {
   const targets = useMemo(() => {
-    return projects.filter(
-      (p) => p.role === "member" && !!p.sourceProjectId,
-    );
+    return projects.filter((p) => p.role === "member" && !!p.sourceProjectId);
   }, [projects]);
 
   useEffect(() => {
@@ -425,7 +427,9 @@ function useMemberRevokedSync(db0: Firestore, uid: string | null, projects: Proj
         async (snap) => {
           const revokedRemote = !snap.exists()
             ? true
-            : toBool((snap.data() as unknown as Record<string, unknown>)?.revoked);
+            : toBool(
+                (snap.data() as unknown as Record<string, unknown>)?.revoked,
+              );
 
           const revokedLocal = !!p.revoked;
           if (revokedRemote === revokedLocal) return;
@@ -568,7 +572,9 @@ export default function RenovaProjectsPage() {
       // ✅ ここが「reason エラーを確実に止める」分岐
       if (res.ok === false) {
         if (res.reason === "not_found") {
-          window.alert("共有コードが見つかりません。正しいか確認してください。");
+          window.alert(
+            "共有コードが見つかりません。正しいか確認してください。",
+          );
           return;
         }
         if (res.reason === "already") {
@@ -626,7 +632,9 @@ export default function RenovaProjectsPage() {
       return;
     }
     if (!selected.shareCode) {
-      window.alert("共有コードがありません（shareCode が保存されていません）。");
+      window.alert(
+        "共有コードがありません（shareCode が保存されていません）。",
+      );
       return;
     }
 
@@ -652,7 +660,7 @@ export default function RenovaProjectsPage() {
   const goProject = useCallback(
     (p: Project) => {
       const href =
-        `/proclink/projects/${encodeURIComponent(p.id)}/work-types` +
+        `/proclink/projects/${encodeURIComponent(p.id)}/menu` +
         `?projectName=${encodeURIComponent(p.name)}`;
       router.push(href);
     },
@@ -915,7 +923,8 @@ export default function RenovaProjectsPage() {
             ) : (
               <div className="mt-4 grid gap-3">
                 <div className="text-sm text-gray-600 dark:text-gray-300">
-                  受け取った CODE を入力すると、この工事があなたの一覧に追加されます。
+                  受け取った CODE
+                  を入力すると、この工事があなたの一覧に追加されます。
                 </div>
 
                 <div>

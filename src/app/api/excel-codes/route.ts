@@ -20,12 +20,6 @@ function normalizeHyphen(s: string): string {
   return s.replace(/[－―ー−]/g, "-");
 }
 
-// ✅ 日本語の表記ゆれ対策：全角英数/全角数字/半角カナなどを統一
-function normalizeJaText(s: string): string {
-  // NFKC: 全角数字「２」→「2」、半角カナ→全角カナ、濁点結合など
-  return s.normalize("NFKC");
-}
-
 // ✅ シート名の揺れ（末尾スペース/ハイフン違い）対策
 function normalizeSheetName(s: string): string {
   return normalizeHyphen(s).replace(/\s+/g, "").trim();
@@ -58,9 +52,7 @@ function resolveSheetName(
  * - 「OAVP-2S」系も拾う
  */
 function extractCandidatesFromCellText(inputRaw: string): string[] {
-  const s0 = normalizeHyphen(normalizeJaText(inputRaw))
-    .replace(/\s+/g, " ")
-    .trim();
+  const s0 = normalizeHyphen(inputRaw).replace(/\s+/g, " ").trim();
   if (!s0) return [];
 
   const s = s0;
@@ -148,7 +140,7 @@ export async function POST(req: Request) {
       // 表示文字列があるなら優先（w）。なければ生値（v）。
       // 数式セルは v に計算結果が入る想定。
       const value = (cell.w ?? cell.v) as unknown;
-      const text = normalizeJaText(toStr(value)).trim();
+      const text = toStr(value).trim();
       if (!text) continue;
 
       const candidates = extractCandidatesFromCellText(text);

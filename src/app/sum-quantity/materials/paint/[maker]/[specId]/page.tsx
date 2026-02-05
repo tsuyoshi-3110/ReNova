@@ -18,9 +18,6 @@ type AggRow = {
   totalKg: number;
   qty: number | null;
   unitLabel: string | null;
-
-  // ✅ 今回選択（または仕様既定）で使われた入目
-  packKgUsed: number | null;
 };
 
 function round1(n: number) {
@@ -52,15 +49,6 @@ function isExcelSavedSum(v: unknown): v is ExcelSavedSum {
   );
 }
 
-function safeJsonParse<T>(s: string | null, fallback: T): T {
-  if (!s) return fallback;
-  try {
-    return JSON.parse(s) as T;
-  } catch {
-    return fallback;
-  }
-}
-
 function readExcelSavedSumsFromStorage(): ExcelSavedSum[] {
   if (typeof window === "undefined") return [];
   const raw = window.localStorage.getItem(EXCEL_SAVED_KEY);
@@ -81,6 +69,15 @@ type SavedCalc = {
   areas: AreaInput;
   aggregated: AggRow[];
 };
+
+function safeJsonParse<T>(s: string | null, fallback: T): T {
+  if (!s) return fallback;
+  try {
+    return JSON.parse(s) as T;
+  } catch {
+    return fallback;
+  }
+}
 
 function uid() {
   return `lc_${Date.now()}_${Math.random().toString(16).slice(2)}`;
@@ -117,7 +114,7 @@ export default function PaintSpecCalcPage() {
         ? getKansaiPaintSpec(specId)
         : null;
 
-  // ✅ AreaKey が flat/upstand/area を含む前提で「全キー」を持たせる
+  // ✅ AreaKey が flat/upstand/area を含む前提で「全キー」を持たせる（これで型エラーが消えます）
   const [areas, setAreas] = useState<Record<AreaKey, string>>({
     flat: "",
     upstand: "",
@@ -137,17 +134,12 @@ export default function PaintSpecCalcPage() {
     Record<string, string>
   >({});
 
-  // ✅ ユーザーが選んだ内容量(kg)で packKg を上書き（kind::元name）
-  const [packKgOverrides, setPackKgOverrides] = useState<
-    Record<string, number>
-  >({});
-
   const areaNumbers = useMemo<AreaInput>(() => {
     const toNum = (s: string) => {
       const n = Number(s);
       return Number.isFinite(n) ? n : 0;
     };
-
+    // ✅ AreaInput も全キー持ちにする（flat/upstand/area）
     return {
       flat: toNum(areas.flat),
       upstand: toNum(areas.upstand),
@@ -172,31 +164,22 @@ export default function PaintSpecCalcPage() {
     return calcSpec(spec, areaNumbers);
   }, [spec, areaNumbers]);
 
-  // spec.materials からメタ（packKg/ラベル/候補等）を引く
+  // spec.materials からメタ（packKg/ラベル等）を引く
   const metas = useMemo(() => {
-    const liquid = new Map<
-      string,
-      { packKg?: number; unitLabel?: string; packKgOptions?: number[] }
-    >();
+    const liquid = new Map<string, { packKg?: number; unitLabel?: string }>();
 
     if (!spec) return { liquid };
 
     for (const m of spec.materials) {
       if (m.kind === "liquidKg") {
-        if (!liquid.has(m.name)) {
-          liquid.set(m.name, {
-            packKg: m.packKg,
-            unitLabel: m.unitLabel,
-            packKgOptions: (m as unknown as { packKgOptions?: number[] })
-              .packKgOptions,
-          });
-        }
+        if (!liquid.has(m.name))
+          liquid.set(m.name, { packKg: m.packKg, unitLabel: m.unitLabel });
       }
     }
     return { liquid };
   }, [spec]);
 
-  // ✅ 塗装：合計のみ（平場/立上りは使わない） + 入目選択対応
+  // ✅ 塗装：合計のみ（平場/立上りは使わない）
   const aggregated = useMemo<AggRow[]>(() => {
     if (!spec) return [];
 
@@ -218,26 +201,8 @@ export default function PaintSpecCalcPage() {
       const add = r.requiredKg ?? 0;
 
       const meta = metas.liquid.get(r.name);
+      const packKg = meta?.packKg && meta.packKg > 0 ? meta.packKg : null;
       const unitLabel = meta?.unitLabel ?? null;
-
-      const packKgBase = meta?.packKg && meta.packKg > 0 ? meta.packKg : null;
-
-      const stableKey = `${r.kind}::${r.name}`;
-      const packKgSelected = packKgOverrides[stableKey];
-
-      const hasPackKgOptions =
-        Array.isArray(meta?.packKgOptions) && meta.packKgOptions.length > 0;
-
-      // ✅ 優先順：ユーザー選択(候補がある時のみ) > 仕様の packKg > null
-      const packKg =
-        hasPackKgOptions &&
-        typeof packKgSelected === "number" &&
-        Number.isFinite(packKgSelected) &&
-        packKgSelected > 0
-          ? packKgSelected
-          : packKgBase;
-
-      const packKgUsed = packKg ?? null;
 
       if (!prev) {
         const totalKg = round1(add);
@@ -249,7 +214,6 @@ export default function PaintSpecCalcPage() {
           totalKg,
           qty,
           unitLabel,
-          packKgUsed,
         });
       } else {
         const totalKg = round1(prev.totalKg + add);
@@ -260,21 +224,19 @@ export default function PaintSpecCalcPage() {
           totalKg,
           qty,
           unitLabel,
-          packKgUsed,
         });
       }
     }
 
     const out: AggRow[] = [];
-    for (const key of orderedKeys) {
-      const v = agg.get(key);
+    for (const k of orderedKeys) {
+      const v = agg.get(k);
       if (v) out.push(v);
     }
     return out;
-  }, [rows, spec, metas, packKgOverrides]);
+  }, [rows, spec, metas]);
 
   // ✅ 反映（表示＆保存）
-  // 重要：キーは「元の kind::元の name」で固定。名前を変えてもキーが変わらない。
   const aggregatedEdited = useMemo<AggRow[]>(() => {
     return aggregated.map((r) => {
       const key = `${r.kind}::${r.name}`;
@@ -315,7 +277,6 @@ export default function PaintSpecCalcPage() {
   const onSave = () => {
     if (!spec) return;
     if (!canSave) return;
-    if (typeof window === "undefined") return;
 
     const displayName = saveSpecName.trim()
       ? saveSpecName.trim()
@@ -330,6 +291,8 @@ export default function PaintSpecCalcPage() {
       aggregated: aggregatedEdited,
     };
 
+    if (typeof window === "undefined") return;
+
     const current = safeJsonParse<SavedCalc[]>(
       window.localStorage.getItem(STORAGE_KEY),
       [],
@@ -340,27 +303,6 @@ export default function PaintSpecCalcPage() {
 
     setSaveMsg(`保存しました（${fmtDateTimeJp(rec.savedAt)}）`);
   };
-
-  // ✅ spec が無い場合でもクラッシュしない
-  if (!spec) {
-    return (
-      <main className="min-h-screen bg-gray-100 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
-        <div className="max-w-3xl mx-auto p-6 space-y-3">
-          <h1 className="text-xl font-extrabold">仕様が見つかりません</h1>
-          <p className="text-sm text-gray-600 dark:text-gray-300">
-            maker: <span className="font-bold">{makerRaw || "(none)"}</span>
-          </p>
-          <p className="text-sm text-gray-600 dark:text-gray-300">
-            specId: <span className="font-bold">{specId || "(none)"}</span>
-          </p>
-          <p className="text-sm text-gray-600 dark:text-gray-300">
-            対応する仕様が specs/{makerRaw}{" "}
-            側の配列に入っているか確認してください。
-          </p>
-        </div>
-      </main>
-    );
-  }
 
   return (
     <main className="min-h-screen bg-gray-100 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
@@ -386,7 +328,6 @@ export default function PaintSpecCalcPage() {
                   type="button"
                   onClick={() => onCopyExcelSumM2(s.sumM2)}
                   className="w-full text-left rounded-lg border p-3 hover:opacity-90 dark:border-gray-800"
-                  title="タップでコピー"
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
@@ -423,7 +364,7 @@ export default function PaintSpecCalcPage() {
                 <input
                   inputMode="decimal"
                   className="w-full rounded-lg border px-3 py-2 text-sm bg-white dark:bg-gray-950 dark:border-gray-800"
-                  value={areas[f.key] ?? ""}
+                  value={areas[f.key]}
                   onChange={(e) =>
                     setAreas((prev) => ({ ...prev, [f.key]: e.target.value }))
                   }
@@ -460,119 +401,34 @@ export default function PaintSpecCalcPage() {
 
           <div className="grid gap-2">
             {aggregatedEdited.map((r, idx) => {
-              // materialNameEdits / packKgOverrides のキーは「元の名前」で固定したいので
-              // ここは aggregated[idx]（元）を基準にする
               const base = aggregated[idx];
-              const stableKey = base
+              const key = base
                 ? `${base.kind}::${base.name}`
                 : `${r.kind}::${r.name}`;
 
               return (
                 <div
-                  key={stableKey}
+                  key={idx}
                   className="rounded-lg border p-3 dark:border-gray-800"
                 >
                   <div className="text-sm font-extrabold">{r.name}</div>
 
-                  {/* ✅ 材料名（編集して保存できる） */}
+                  {/* 材料名の編集欄（既定で元の材料名） */}
                   <div className="mt-2">
                     <div className="text-xs font-bold text-gray-700 dark:text-gray-200">
                       保存用の材料名
                     </div>
                     <input
                       className="mt-1 w-full rounded-lg border px-3 py-2 text-sm bg-white dark:bg-gray-950 dark:border-gray-800"
-                      value={
-                        materialNameEdits[stableKey] ?? base?.name ?? r.name
-                      }
+                      value={materialNameEdits[key] ?? base?.name ?? r.name}
                       onChange={(e) =>
                         setMaterialNameEdits((prev) => ({
                           ...prev,
-                          [stableKey]: e.target.value,
+                          [key]: e.target.value,
                         }))
                       }
-                      placeholder={base?.name ?? r.name}
                     />
                   </div>
-
-                  {/* ✅ 内容量（packKgOptions がある材料だけ表示） */}
-                  {(() => {
-                    const meta = metas.liquid.get(base?.name ?? r.name);
-                    const specOpts = meta?.packKgOptions;
-
-                    if (!Array.isArray(specOpts) || specOpts.length === 0) {
-                      return null;
-                    }
-
-                    const basePackKg = meta?.packKg;
-
-                    const options = Array.from(
-                      new Set(
-                        specOpts.filter(
-                          (n) =>
-                            typeof n === "number" &&
-                            Number.isFinite(n) &&
-                            n > 0,
-                        ),
-                      ),
-                    ).sort((a, b) => a - b);
-
-                    const selected = packKgOverrides[stableKey];
-
-                    return (
-                      <div className="mt-2">
-                        <div className="text-xs font-bold text-gray-700 dark:text-gray-200">
-                          内容量
-                        </div>
-
-                        <div className="mt-1 grid gap-1">
-                          <select
-                            className="w-full rounded-lg border px-3 py-2 text-sm bg-white dark:bg-gray-950 dark:border-gray-800"
-                            value={
-                              typeof selected === "number" &&
-                              Number.isFinite(selected) &&
-                              selected > 0
-                                ? String(selected)
-                                : ""
-                            }
-                            onChange={(e) => {
-                              const v = e.target.value;
-                              setPackKgOverrides((prev) => {
-                                if (!v) {
-                                  const rest = { ...prev };
-                                  delete rest[stableKey];
-                                  return rest;
-                                }
-                                const n = Number(v);
-                                if (!Number.isFinite(n) || n <= 0) {
-                                  const rest = { ...prev };
-                                  delete rest[stableKey];
-                                  return rest;
-                                }
-                                return { ...prev, [stableKey]: n };
-                              });
-                            }}
-                          >
-                            <option value="">
-                              {typeof basePackKg === "number" &&
-                              Number.isFinite(basePackKg) &&
-                              basePackKg > 0
-                                ? `${basePackKg}kg`
-                                : "未設定"}
-                            </option>
-                            {options.map((n) => (
-                              <option key={n} value={String(n)}>
-                                {n}kg
-                              </option>
-                            ))}
-                          </select>
-
-                          <div className="text-xs text-gray-600 dark:text-gray-300">
-                            ※選択すると缶数（qty）の計算に反映されます
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })()}
 
                   {/* 合計表示 */}
                   {r.qty != null && r.unitLabel ? (
@@ -584,28 +440,12 @@ export default function PaintSpecCalcPage() {
                       <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
                         （合計重量：{r.totalKg} kg）
                       </div>
-                      {typeof r.packKgUsed === "number" &&
-                      Number.isFinite(r.packKgUsed) &&
-                      r.packKgUsed > 0 ? (
-                        <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                          （入目：{r.packKgUsed} kg）
-                        </div>
-                      ) : null}
                     </>
                   ) : (
-                    <>
-                      <div className="mt-2 text-sm">
-                        合計：
-                        <span className="font-extrabold">{r.totalKg}</span> kg
-                      </div>
-                      {typeof r.packKgUsed === "number" &&
-                      Number.isFinite(r.packKgUsed) &&
-                      r.packKgUsed > 0 ? (
-                        <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                          （入目：{r.packKgUsed} kg）
-                        </div>
-                      ) : null}
-                    </>
+                    <div className="mt-2 text-sm">
+                      合計：<span className="font-extrabold">{r.totalKg}</span>{" "}
+                      kg
+                    </div>
                   )}
                 </div>
               );
