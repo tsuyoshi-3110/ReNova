@@ -122,7 +122,7 @@ export async function POST(req: Request) {
     let parsed: { lines: { index: number; category: string }[] };
     try {
       parsed = JSON.parse(outText);
-    } catch (e) {
+    } catch  {
       console.error("Failed to parse JSON from OpenAI:", outText);
       return NextResponse.json(
         {

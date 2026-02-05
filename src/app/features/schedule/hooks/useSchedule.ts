@@ -475,5 +475,5 @@ export function useSchedule(
       cleanupEnd: _cleanupEnd,
       holidaySet,
     };
-  }, [startDate, saturdayOff, holidayText, holidaySet, customSections]);
+  }, [startDate, saturdayOff, holidaySet, customSections]);
 }

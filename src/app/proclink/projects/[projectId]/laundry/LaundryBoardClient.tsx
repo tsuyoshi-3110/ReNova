@@ -33,6 +33,7 @@ export default function LaundryBoardClient({
 }) {
   const [config, setConfig] = useState<LaundryBoardConfig | null>(null);
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const floors = config?.floors ?? [];
   const maxRooms = useMemo(() => calcMaxRooms(floors), [floors]);
 

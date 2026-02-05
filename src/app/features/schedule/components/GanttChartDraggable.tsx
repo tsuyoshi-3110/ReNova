@@ -42,6 +42,7 @@ export function GanttChartDraggable({
 
   // 安全な入力
   const rows = Array.isArray(data) ? data : [];
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const days = Array.isArray(workingDays) ? workingDays : [];
   const cols = Math.max(days.length, 1);
 
